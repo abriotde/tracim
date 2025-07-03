@@ -25,14 +25,14 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("db_vfs_service.log"),
+        logging.FileHandler("vfs_tracim_service.log"),
         logging.StreamHandler(sys.stdout)
     ]
 )
-logger = logging.getLogger("db_vfs_service")
+logger = logging.getLogger("vfs_tracim_service")
 
 # Socket path
-SOCKET_PATH = "/var/run/db_vfs.sock"
+SOCKET_PATH = "/var/run/vfs_tracim_service.sock"
 
 # Globals
 active_connections = {}  # Map of connection IDs to user info
