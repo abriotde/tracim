@@ -9,6 +9,10 @@ Run ./install.sh
 
 https://wiki.samba.org/index.php/Writing_a_Samba_VFS_Module
 
+### Samba references
+
+https://bugzilla.samba.org/createaccount-save.html
+bugzilla-maintenance@samba.org
 
 ## For Tracim Python part:
 
@@ -21,4 +25,5 @@ https://demo.tracim.fr/api/doc/
 - update_file_data()
 - delete()
 - save()
+
 

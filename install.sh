@@ -22,7 +22,6 @@ VFS_C_SOURCE="$PROJECT_NAME.c"
 PWD=$(pwd)
 SAMBA_SOURCE=$PWD/samba
 SRC_DIR="$PWD/src"
-SAMBA_MODULES_DIR="/usr/lib/x86_64-linux-gnu/samba/vfs/"
 PYTHON_SERVICE_DIR="/usr/local/lib/$PROJECT_NAME"
 SOCKET_PATH="/var/run/$PROJECT_NAME.sock"
 LOG_FILE="/var/log/$PROJECT_NAME.log"
@@ -43,7 +42,7 @@ function install_deps {
 		samba-dev libsmbclient-dev \
 		python3-dev python3-pip  \
 		liblmdb-dev lmdb-utils libgpgme11-dev libparse-yapp-perl \
-		libjansson-dev libarchive-dev > /dev/null 2>&1
+		libjansson-dev libarchive-dev libutf8proc-dev > /dev/null 2>&1
 	apt install -y \
 	build-essential \
 	python3-dev \
@@ -82,17 +81,29 @@ function load_samba_source {
 	# wget https://download.samba.org/pub/samba/samba-latest.tar.gz
 	# tar -xvf samba-latest.tar.gz
 	# samba-4.22.2
-	git submodule update --init --recursive
+	git submodule update --init --recursive > /dev/null 2>&1
 	if [ ! -d "$SAMBA_SOURCE" ]; then
 		echo "Error: Samba source directory not found at: $SAMBA_SOURCE"
 		echo "Please update the SAMBA_SOURCE variable in this script."
 		exit 1
 	fi
+	SMBD_VERSION=$(smbd --version | awk -F" |-" '{print $2}')
+	git tag -l | grep "^samba-$SMBD_VERSION$"
+	if [ $? -eq 0 ]; then
+		echo "Samba git checkout to matches your smbd server version ($SMBD_VERSION). git checkout --force tags/samba-$SMBD_VERSION"
+		git checkout --force tags/samba-$SMBD_VERSION > /dev/null
+	fi
+	source $SAMBA_SOURCE/VERSION
+	SAMBA_SOURCE_VERSION="$SAMBA_VERSION_MAJOR.$SAMBA_VERSION_MINOR.$SAMBA_VERSION_RELEASE"
+	if [ "x$SAMBA_SOURCE_VERSION" != "x$SMBD_VERSION" ]; then
+		echo "Error: Unable to match Samba source version with your smbd server ($SMBD_VERSION != $SAMBA_SOURCE_VERSION)."
+		exit 1
+	fi
 }
 
 function compile_vfs_module {
-	echo "Compile VFS module..."
-	# echo "EXEC: cp $SRC_DIR/$VFS_C_SOURCE $SMB_MODULES_DIR/"
+	echo "Add VFS module to Samba..."
+	echo "EXEC: cp $SRC_DIR/$VFS_C_SOURCE $SMB_MODULES_DIR/"
 	cp $SRC_DIR/$VFS_C_SOURCE $SMB_MODULES_DIR/
 
 	# echo "EXEC: grep $PROJECT_NAME $SMB_MODULES_DIR/../wscript  /dev/null"
@@ -145,10 +156,14 @@ EOF
 		fi
 	fi
 
-	echo "Compiling VFS module..."
 	cd $SAMBA_SOURCE
-	# ./configure.developer --enable-debug # --without-ldb-lmdb
-	./configure
+	if [ ! -f Makefile ]; then
+		echo "Compiling VFS module..."
+		# ./configure.developer --enable-debug # --without-ldb-lmdb
+		# --enable-rust --with-himmelblau
+		# ./configure --with-samba-source=/usr/include/samba-4.0
+		./configure # --enable-tracim
+	fi
 	make # $PROJECT_NAME.so
 	if [ $? -ne 0 ]; then
 		echo "Failed to compile the VFS module"
@@ -164,9 +179,12 @@ SO_LIBRARY2="$BASE_NAME.so"
 
 function install_vfs_module {
 	echo "Installing VFS module..."
-	cp $SAMBA_SOURCE/bin/modules/vfs/$SO_LIBRARY2 "$OS_SAMBA_MODULES_DIR/"
+	src=$SAMBA_SOURCE/bin/modules/vfs/$SO_LIBRARY2
+	if [ -L $src ]; then
+		src=$(readlink -ne $SAMBA_SOURCE/bin/modules/vfs/$SO_LIBRARY2)
+	fi
+	cp $src "$OS_SAMBA_MODULES_DIR/$SO_LIBRARY2"
 	chmod 755 "$OS_SAMBA_MODULES_DIR/$SO_LIBRARY2"
-
 
 	SHARE_DIR="/var/lib/samba/$BASE_NAME"
 	SMB_CONF_FILE="/etc/samba/smb.conf"
@@ -214,7 +232,7 @@ function install_python_service {
 	chmod 755 "$PYTHON_SERVICE_DIR/vfs_tracim_service.py"
 
 	echo "Creating systemd service..."
-cat > "$SYSTEMD_SERVICE_FILE" << EOF
+	cat > "$SYSTEMD_SERVICE_FILE" << EOF
 [Unit]
 Description=Database VFS Service for Samba
 After=network.target
@@ -233,7 +251,7 @@ EOF
 
 # install_deps
 # load_samba_source
-# compile_vfs_module
+compile_vfs_module
 install_vfs_module
 exit 0
 install_python_deps
