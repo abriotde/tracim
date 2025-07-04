@@ -2,7 +2,8 @@
  * Samba 4.x VFS module for database-backed virtual filesystem
  * Communicates with Python DB VFS service via JSON over Unix socket
  */
-
+#define DEBUG
+// Set in smb.conf "log level = 3 vfs:10"
 #include "includes.h"
 #include "smbd/smbd.h"
 #include "system/filesys.h"
@@ -14,29 +15,68 @@
 #include <sys/un.h>
 #include <errno.h>
 
-#define DB_VFS_SOCKET_PATH "/var/run/db_vfs.sock"
+#ifdef __cplusplus
+extern "C" {
+#endif
+        #include <errno.h>
+	#include <stdio.h>
+	#include <stdarg.h> // for variable number of arguments in functions
+#ifdef __cplusplus
+}
+#endif
+
+#ifdef DEBUG
+	#define LOG_DEBUG1(...) fprintf(stdout,__VA_ARGS__)
+	#define LOG_DEBUG2(...) fprintf(stdout,__VA_ARGS__)
+
+	#define WHERESTR  "[file %s, line %d]: "
+	#define DEBUGPRINT(...)  DEBUG2(WHERESTR _fmt, __FILE__, __LINE__, __VA_ARGS__)
+#else
+	#define LOG_DEBUG_(msg)
+	#define LOG_DEBUG1(...)
+	#define LOG_DEBUG2(...)   
+#endif
+
+#define LOG_ERR 1
+#define LOG_WARN 2
+#define LOG_INFO 3
+#define LOG_DEBUG 4
+#define LOG_TRACE 5
+
+#ifdef MAIN_FILE
+int log_level;
+#else
+extern int log_level;
+#endif
+
+
+
+#define DB_VFS_SOCKET_PATH "/var/run/tracim.sock"
 #define MAX_RESPONSE_SIZE 65536
 #define MAX_REQUEST_SIZE 32768
 
 /* VFS module data structure */
-struct db_vfs_data {
+struct tracim_data {
     int socket_fd;
     bool connected;
     char *socket_path;
+    char *connection_string;
 };
 
 /* Helper function to get module data */
-static struct db_vfs_data *get_db_vfs_data(vfs_handle_struct *handle)
+static struct tracim_data *get_tracim_data(vfs_handle_struct *handle)
 {
-    struct db_vfs_data *data;
+	LOG_DEBUG1("Tracim: get_tracim_data().\n");
+    struct tracim_data *data;
     
-    SMB_VFS_HANDLE_GET_DATA(handle, data, struct db_vfs_data, return NULL);
+    SMB_VFS_HANDLE_GET_DATA(handle, data, struct tracim_data, return NULL);
     return data;
 }
 
 /* Connect to Unix socket */
-static int connect_to_service(struct db_vfs_data *data)
+static int connect_to_service(struct tracim_data *data)
 {
+	LOG_DEBUG1("Tracim: connect_to_service().\n");
     struct sockaddr_un addr;
     int ret;
     
@@ -51,7 +91,7 @@ static int connect_to_service(struct db_vfs_data *data)
     
     data->socket_fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (data->socket_fd < 0) {
-        DEBUG(0, ("db_vfs: Failed to create socket: %s\n", strerror(errno)));
+        DEBUG(0, ("tracim: Failed to create socket: %s\n", strerror(errno)));
         return -1;
     }
     
@@ -61,7 +101,7 @@ static int connect_to_service(struct db_vfs_data *data)
     
     ret = connect(data->socket_fd, (struct sockaddr *)&addr, sizeof(addr));
     if (ret < 0) {
-        DEBUG(0, ("db_vfs: Failed to connect to %s: %s\n", 
+        DEBUG(0, ("tracim: Failed to connect to %s: %s\n", 
                   data->socket_path, strerror(errno)));
         close(data->socket_fd);
         data->socket_fd = -1;
@@ -70,13 +110,14 @@ static int connect_to_service(struct db_vfs_data *data)
     }
     
     data->connected = true;
-    DEBUG(5, ("db_vfs: Connected to service at %s\n", data->socket_path));
+    DEBUG(5, ("tracim: Connected to service at %s\n", data->socket_path));
     return 0;
 }
 
 /* Send JSON request and receive response */
-static json_t *send_request(struct db_vfs_data *data, json_t *request)
+static json_t *send_request(struct tracim_data *data, json_t *request)
 {
+	LOG_DEBUG1("Tracim: send_request().\n");
     char *request_str;
     char response_buf[MAX_RESPONSE_SIZE];
     ssize_t bytes_sent, bytes_received;
@@ -89,14 +130,14 @@ static json_t *send_request(struct db_vfs_data *data, json_t *request)
     
     request_str = json_dumps(request, JSON_COMPACT);
     if (!request_str) {
-        DEBUG(0, ("db_vfs: Failed to serialize JSON request\n"));
+        DEBUG(0, ("tracim: Failed to serialize JSON request\n"));
         return NULL;
     }
     
     /* Send request */
     bytes_sent = send(data->socket_fd, request_str, strlen(request_str), 0);
     if (bytes_sent < 0) {
-        DEBUG(0, ("db_vfs: Failed to send request: %s\n", strerror(errno)));
+        DEBUG(0, ("tracim: Failed to send request: %s\n", strerror(errno)));
         data->connected = false;
         free(request_str);
         return NULL;
@@ -109,7 +150,7 @@ static json_t *send_request(struct db_vfs_data *data, json_t *request)
     /* Receive response */
     bytes_received = recv(data->socket_fd, response_buf, sizeof(response_buf) - 1, 0);
     if (bytes_received < 0) {
-        DEBUG(0, ("db_vfs: Failed to receive response: %s\n", strerror(errno)));
+        DEBUG(0, ("tracim: Failed to receive response: %s\n", strerror(errno)));
         data->connected = false;
         return NULL;
     }
@@ -119,7 +160,7 @@ static json_t *send_request(struct db_vfs_data *data, json_t *request)
     /* Parse JSON response */
     response = json_loads(response_buf, 0, &error);
     if (!response) {
-        DEBUG(0, ("db_vfs: Failed to parse JSON response: %s\n", error.text));
+        DEBUG(0, ("tracim: Failed to parse JSON response: %s\n", error.text));
         return NULL;
     }
     
@@ -128,32 +169,42 @@ static json_t *send_request(struct db_vfs_data *data, json_t *request)
 
 /* VFS operations */
 
-static int db_vfs_connect(vfs_handle_struct *handle, const char *service, const char *user)
+static int tracim_connect(vfs_handle_struct *handle, const char *service, const char *user)
 {
-    struct db_vfs_data *data;
+	LOG_DEBUG1("Tracim: tracim_connect().\n");
+    struct tracim_data *data;
     const char *socket_path;
     
-    data = talloc_zero(handle, struct db_vfs_data);
+    data = talloc_zero(handle, struct tracim_data);
     if (!data) {
-        DEBUG(0, ("db_vfs: Failed to allocate memory\n"));
+        DEBUG(0, ("tracim: Failed to allocate memory\n"));
         return -1;
     }
-    
+	const char *connection_string = lp_parm_const_string(SNUM(handle->conn), "tracim", "connection_string", NULL);
+    if (connection_string) {
+        data->connection_string = talloc_strdup(data, connection_string);
+        DEBUG(5, ("db_vfs: Using connection string: %s\n", data->connection_string));
+    } else {
+        DEBUG(0, ("db_vfs: No connection string specified in config\n"));
+        data->connection_string = NULL;
+    }
+
     /* Get socket path from config, default to DB_VFS_SOCKET_PATH */
-    socket_path = lp_parm_const_string(SNUM(handle->conn), "db_vfs", "socket_path", DB_VFS_SOCKET_PATH);
+    socket_path = lp_parm_const_string(SNUM(handle->conn), "tracim", "socket_path", DB_VFS_SOCKET_PATH);
     data->socket_path = talloc_strdup(data, socket_path);
     data->socket_fd = -1;
     data->connected = false;
     
-    SMB_VFS_HANDLE_SET_DATA(handle, data, NULL, struct db_vfs_data, return -1);
+    SMB_VFS_HANDLE_SET_DATA(handle, data, NULL, struct tracim_data, return -1);
     
-    DEBUG(5, ("db_vfs: Connected to service %s, socket: %s\n", service, socket_path));
+    DEBUG(5, ("tracim: Connected to service %s, socket: %s\n", service, socket_path));
     return SMB_VFS_NEXT_CONNECT(handle, service, user);
 }
 
-static void db_vfs_disconnect(vfs_handle_struct *handle)
+static void tracim_disconnect(vfs_handle_struct *handle)
 {
-    struct db_vfs_data *data = get_db_vfs_data(handle);
+	LOG_DEBUG1("Tracim: tracim_disconnect().\n");
+    struct tracim_data *data = get_tracim_data(handle);
     
     if (data && data->socket_fd >= 0) {
         close(data->socket_fd);
@@ -164,13 +215,14 @@ static void db_vfs_disconnect(vfs_handle_struct *handle)
     SMB_VFS_NEXT_DISCONNECT(handle);
 }
 
-static int db_vfs_openat(vfs_handle_struct *handle,
+static int tracim_openat(vfs_handle_struct *handle,
                          const struct files_struct *dirfsp,
                          const struct smb_filename *smb_fname,
                          files_struct *fsp,
                          const struct vfs_open_how *how)
 {
-    struct db_vfs_data *data = get_db_vfs_data(handle);
+	LOG_DEBUG1("Tracim: tracim_openat().\n");
+    struct tracim_data *data = get_tracim_data(handle);
     json_t *request, *response, *success_obj, *fd_obj;
     int result = -1;
 
@@ -190,7 +242,7 @@ static int db_vfs_openat(vfs_handle_struct *handle,
     json_decref(request);
     
     if (!response) {
-        DEBUG(3, ("db_vfs: Failed to get response for open, falling back to next VFS\n"));
+        DEBUG(3, ("tracim: Failed to get response for open, falling back to next VFS\n"));
         return SMB_VFS_NEXT_OPENAT(handle, dirfsp, smb_fname, fsp, how);
     }
     
@@ -200,10 +252,10 @@ static int db_vfs_openat(vfs_handle_struct *handle,
         fd_obj = json_object_get(response, "fd");
         if (fd_obj && json_is_integer(fd_obj)) {
             result = json_integer_value(fd_obj);
-            DEBUG(5, ("db_vfs: Successfully opened %s, fd=%d\n", smb_fname->base_name, result));
+            DEBUG(5, ("tracim: Successfully opened %s, fd=%d\n", smb_fname->base_name, result));
         }
     } else {
-        DEBUG(3, ("db_vfs: Open failed for %s, falling back to next VFS\n", smb_fname->base_name));
+        DEBUG(3, ("tracim: Open failed for %s, falling back to next VFS\n", smb_fname->base_name));
         json_decref(response);
         return SMB_VFS_NEXT_OPENAT(handle, dirfsp, smb_fname, fsp, how);
     }
@@ -212,9 +264,10 @@ static int db_vfs_openat(vfs_handle_struct *handle,
     return result >= 0 ? result : SMB_VFS_NEXT_OPENAT(handle, dirfsp, smb_fname, fsp, how);
 }
 
-static int db_vfs_close(vfs_handle_struct *handle, files_struct *fsp)
+static int tracim_close(vfs_handle_struct *handle, files_struct *fsp)
 {
-    struct db_vfs_data *data = get_db_vfs_data(handle);
+	LOG_DEBUG1("Tracim: tracim_close().\n");
+    struct tracim_data *data = get_tracim_data(handle);
     json_t *request, *response, *success_obj;
     int result = 0;
     
@@ -242,10 +295,11 @@ static int db_vfs_close(vfs_handle_struct *handle, files_struct *fsp)
     return SMB_VFS_NEXT_CLOSE(handle, fsp);
 }
 
-static ssize_t db_vfs_pread(vfs_handle_struct *handle, files_struct *fsp, 
+static ssize_t tracim_pread(vfs_handle_struct *handle, files_struct *fsp, 
                             void *data_buf, size_t n, off_t offset)
 {
-    struct db_vfs_data *data = get_db_vfs_data(handle);
+	LOG_DEBUG1("Tracim: tracim_pread().\n");
+    struct tracim_data *data = get_tracim_data(handle);
     json_t *request, *response, *success_obj, *data_obj;
     ssize_t result = -1;
     const char *encoded_data;
@@ -291,10 +345,11 @@ static ssize_t db_vfs_pread(vfs_handle_struct *handle, files_struct *fsp,
     return result >= 0 ? result : SMB_VFS_NEXT_PREAD(handle, fsp, data_buf, n, offset);
 }
 
-static ssize_t db_vfs_pwrite(vfs_handle_struct *handle, files_struct *fsp,
+static ssize_t tracim_pwrite(vfs_handle_struct *handle, files_struct *fsp,
                              const void *data_buf, size_t n, off_t offset)
 {
-    struct db_vfs_data *data = get_db_vfs_data(handle);
+	LOG_DEBUG1("Tracim: tracim_pwrite().\n");
+    struct tracim_data *data = get_tracim_data(handle);
     json_t *request, *response, *success_obj, *bytes_obj;
     ssize_t result = -1;
     char *encoded_data;
@@ -342,9 +397,10 @@ static ssize_t db_vfs_pwrite(vfs_handle_struct *handle, files_struct *fsp,
     return result >= 0 ? result : SMB_VFS_NEXT_PWRITE(handle, fsp, data_buf, n, offset);
 }
 
-static int db_vfs_stat(vfs_handle_struct *handle, struct smb_filename *smb_fname)
+static int tracim_stat(vfs_handle_struct *handle, struct smb_filename *smb_fname)
 {
-    struct db_vfs_data *data = get_db_vfs_data(handle);
+	LOG_DEBUG1("Tracim: tracim_stat().\n");
+    struct tracim_data *data = get_tracim_data(handle);
     json_t *request, *response, *success_obj, *stat_obj;
     int result = -1;
     
@@ -394,12 +450,13 @@ static int db_vfs_stat(vfs_handle_struct *handle, struct smb_filename *smb_fname
     return result >= 0 ? result : SMB_VFS_NEXT_STAT(handle, smb_fname);
 }
 
-static int db_vfs_unlinkat(vfs_handle_struct *handle,
+static int tracim_unlinkat(vfs_handle_struct *handle,
                            struct files_struct *dirfsp,
                            const struct smb_filename *smb_fname,
                            int flags)
 {
-    struct db_vfs_data *data = get_db_vfs_data(handle);
+	LOG_DEBUG1("Tracim: tracim_unlinkat().\n");
+    struct tracim_data *data = get_tracim_data(handle);
     json_t *request, *response, *success_obj;
     int result = -1;
     
@@ -432,18 +489,18 @@ static int db_vfs_unlinkat(vfs_handle_struct *handle,
 }
 
 /* VFS operations structure for Samba 4.x */
-static struct vfs_fn_pointers db_vfs_functions = {
-    .connect_fn = db_vfs_connect,
-    .disconnect_fn = db_vfs_disconnect,
-    .openat_fn = db_vfs_openat,
-    .close_fn = db_vfs_close,
-    .pread_fn = db_vfs_pread,
-    .pwrite_fn = db_vfs_pwrite,
-    .stat_fn = db_vfs_stat,
-    .unlinkat_fn = db_vfs_unlinkat,
+static struct vfs_fn_pointers tracim_functions = {
+    .connect_fn = tracim_connect,
+    .disconnect_fn = tracim_disconnect,
+    .openat_fn = tracim_openat,
+    .close_fn = tracim_close,
+    .pread_fn = tracim_pread,
+    .pwrite_fn = tracim_pwrite,
+    .stat_fn = tracim_stat,
+    .unlinkat_fn = tracim_unlinkat,
 };
 
-NTSTATUS vfs_db_vfs_init(TALLOC_CTX *ctx)
+NTSTATUS vfs_tracim_init(TALLOC_CTX *ctx)
 {
-    return smb_register_vfs(SMB_VFS_INTERFACE_VERSION, "db_vfs", &db_vfs_functions);
+    return smb_register_vfs(SMB_VFS_INTERFACE_VERSION, "tracim", &tracim_functions);
 }
