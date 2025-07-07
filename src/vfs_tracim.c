@@ -2,7 +2,7 @@
  * Samba 4.x VFS module for database-backed virtual filesystem
  * Communicates with Python DB VFS service via JSON over Unix socket
  */
-#define TRACIM_DEBUG
+#undef TRACIM_DEBUG
 // Set in smb.conf "log level = 3 vfs:10"
 #include "includes.h"
 #include "smbd/smbd.h"
@@ -14,6 +14,8 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <errno.h>
+
+extern NTSTATUS smb_register_vfs(int version, const char *name, const struct vfs_fn_pointers *fns);
 
 #ifdef __cplusplus
 extern "C" {
@@ -507,7 +509,14 @@ NTSTATUS vfs_tracim_init(TALLOC_CTX *ctx)
 {
 	LOG_DEBUG1("Tracim: vfs_tracim_init().\n");
 	DEBUG(0, ("tracim: Initializing VFS tracim module\n"));
-	NTSTATUS status = smb_register_vfs(SMB_VFS_INTERFACE_VERSION, "tracim", &tracim_functions);
+	NTSTATUS (*real_smb_register_vfs)(int, const char *, const struct vfs_fn_pointers *);
+	real_smb_register_vfs = dlsym(RTLD_DEFAULT, "smb_register_vfs");
+    if (!real_smb_register_vfs) {
+        DEBUG(0, ("Could not find smb_register_vfs in main process\n"));
+        return NT_STATUS_UNSUCCESSFUL;
+    }
+
+	NTSTATUS status = real_smb_register_vfs(SMB_VFS_INTERFACE_VERSION, "tracim", &tracim_functions);
     if (!NT_STATUS_IS_OK(status)) {
         DEBUG(0, ("tracim: Failed to register VFS module: %s\n", nt_errstr(status)));
     } else {

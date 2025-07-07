@@ -1,18 +1,17 @@
 
 # Install
 
-Run ./install.sh
+Run:
+ 
+	$ sudo ./install.sh
 
 # Documentation
 
 ## For Samba VFS C part:
 
+The Samba VFS module, is named tracim. So the dynamic library to put in VFS folder is tracim.so.
+
 https://wiki.samba.org/index.php/Writing_a_Samba_VFS_Module
-
-### Samba references
-
-https://bugzilla.samba.org/createaccount-save.html
-bugzilla-maintenance@samba.org
 
 ## For Tracim Python part:
 
@@ -26,4 +25,7 @@ https://demo.tracim.fr/api/doc/
 - delete()
 - save()
 
+# Warning
+
+* For writing the C Samba VFS module, we are dependant of the minor version of Samba deamon (smbd). So it imply to compile a VFS driver for each version of Samba in production... A Samba bug report is open for this : https://bugzilla.samba.org/show_bug.cgi?id=15878
 
