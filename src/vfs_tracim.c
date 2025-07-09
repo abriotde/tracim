@@ -55,7 +55,7 @@ extern int log_level;
 #error "SMB_VFS_INTERFACE_VERSION not defined"
 #endif
 
-#define DB_VFS_SOCKET_PATH "/var/run/tracim.sock"
+#define DB_VFS_SOCKET_PATH "/var/run/tracim_service.sock"
 #define MAX_RESPONSE_SIZE 65536
 #define MAX_REQUEST_SIZE 32768
 
@@ -65,6 +65,7 @@ struct tracim_data {
     bool connected;
     char *socket_path;
     char *connection_string;
+	char *user;
 };
 
 /* Helper function to get module data */
@@ -74,6 +75,10 @@ static struct tracim_data *get_tracim_data(vfs_handle_struct *handle)
     struct tracim_data *data;
     
     SMB_VFS_HANDLE_GET_DATA(handle, data, struct tracim_data, return NULL);
+	if(!data) {
+		LOG_DEBUG1("Tracim: tracim_openat() - No tracim data found.\n");
+		return NULL;
+	}
     return data;
 }
 
@@ -176,7 +181,7 @@ static json_t *send_request(struct tracim_data *data, json_t *request)
 static int tracim_connect(vfs_handle_struct *handle, const char *service, const char *user)
 {
 	LOG_DEBUG1("Tracim: tracim_connect().\n");
-    DEBUG(0, ("tracim: tracim_connect()\n"));
+    DEBUG(0, ("tracim: tracim_connect(%s)\n", user));
     struct tracim_data *data;
     const char *socket_path;
     
@@ -185,12 +190,13 @@ static int tracim_connect(vfs_handle_struct *handle, const char *service, const 
         DEBUG(0, ("tracim: Failed to allocate memory\n"));
         return -1;
     }
-	const char *connection_string = lp_parm_const_string(SNUM(handle->conn), "tracim", "connection_string", NULL);
+    data->user = talloc_strdup(data->user, user);
+    const char *connection_string = lp_parm_const_string(SNUM(handle->conn), "tracim", "connection_string", NULL);
     if (connection_string) {
         data->connection_string = talloc_strdup(data, connection_string);
-        DEBUG(5, ("db_vfs: Using connection string: %s\n", data->connection_string));
+        DEBUG(0, ("tracim: Using connection string: %s\n", data->connection_string));
     } else {
-        DEBUG(0, ("db_vfs: No connection string specified in config\n"));
+        DEBUG(0, ("tracim: No connection string specified in config\n"));
         data->connection_string = NULL;
     }
 
@@ -202,7 +208,7 @@ static int tracim_connect(vfs_handle_struct *handle, const char *service, const 
     
     SMB_VFS_HANDLE_SET_DATA(handle, data, NULL, struct tracim_data, return -1);
     
-    DEBUG(5, ("tracim: Connected to service %s, socket: %s\n", service, socket_path));
+    DEBUG(0, ("tracim: Connected to service %s, socket: %s\n", service, socket_path));
     return SMB_VFS_NEXT_CONNECT(handle, service, user);
 }
 
@@ -226,8 +232,8 @@ static int tracim_openat(vfs_handle_struct *handle,
                          files_struct *fsp,
                          const struct vfs_open_how *how)
 {
-	LOG_DEBUG1("Tracim: tracim_openat().\n");
     struct tracim_data *data = get_tracim_data(handle);
+    DEBUG(0, ("Tracim: tracim_openat(%s).\n", data->user));
     json_t *request, *response, *success_obj, *fd_obj;
     int result = -1;
 
@@ -237,7 +243,7 @@ static int tracim_openat(vfs_handle_struct *handle,
     
     /* Create JSON request */
     request = json_object();
-    json_object_set_new(request, "operation", json_string("open"));
+    json_object_set_new(request, "op", json_string("open"));
     json_object_set_new(request, "path", json_string(smb_fname->base_name));
     json_object_set_new(request, "flags", json_integer(how->flags));
     json_object_set_new(request, "mode", json_integer(how->mode));
@@ -271,7 +277,7 @@ static int tracim_openat(vfs_handle_struct *handle,
 
 static int tracim_close(vfs_handle_struct *handle, files_struct *fsp)
 {
-	LOG_DEBUG1("Tracim: tracim_close().\n");
+	DEBUG(0, ("Tracim: tracim_close().\n"));
     struct tracim_data *data = get_tracim_data(handle);
     json_t *request, *response, *success_obj;
     int result = 0;
@@ -282,7 +288,7 @@ static int tracim_close(vfs_handle_struct *handle, files_struct *fsp)
     
     /* Create JSON request */
     request = json_object();
-    json_object_set_new(request, "operation", json_string("close"));
+    json_object_set_new(request, "op", json_string("close"));
     json_object_set_new(request, "fd", json_integer(fsp_get_io_fd(fsp)));
     
     /* Send request */
@@ -303,7 +309,7 @@ static int tracim_close(vfs_handle_struct *handle, files_struct *fsp)
 static ssize_t tracim_pread(vfs_handle_struct *handle, files_struct *fsp, 
                             void *data_buf, size_t n, off_t offset)
 {
-	LOG_DEBUG1("Tracim: tracim_pread().\n");
+	DEBUG(0, ("Tracim: tracim_pread().\n"));
     struct tracim_data *data = get_tracim_data(handle);
     json_t *request, *response, *success_obj, *data_obj;
     ssize_t result = -1;
@@ -315,7 +321,7 @@ static ssize_t tracim_pread(vfs_handle_struct *handle, files_struct *fsp,
     
     /* Create JSON request */
     request = json_object();
-    json_object_set_new(request, "operation", json_string("read"));
+    json_object_set_new(request, "op", json_string("read"));
     json_object_set_new(request, "fd", json_integer(fsp_get_io_fd(fsp)));
     json_object_set_new(request, "size", json_integer(n));
     json_object_set_new(request, "offset", json_integer(offset));
@@ -353,7 +359,7 @@ static ssize_t tracim_pread(vfs_handle_struct *handle, files_struct *fsp,
 static ssize_t tracim_pwrite(vfs_handle_struct *handle, files_struct *fsp,
                              const void *data_buf, size_t n, off_t offset)
 {
-	LOG_DEBUG1("Tracim: tracim_pwrite().\n");
+	DEBUG(0, ("Tracim: tracim_pwrite().\n"));
     struct tracim_data *data = get_tracim_data(handle);
     json_t *request, *response, *success_obj, *bytes_obj;
     ssize_t result = -1;
@@ -375,7 +381,7 @@ static ssize_t tracim_pwrite(vfs_handle_struct *handle, files_struct *fsp,
     
     /* Create JSON request */
     request = json_object();
-    json_object_set_new(request, "operation", json_string("write"));
+    json_object_set_new(request, "op", json_string("write"));
     json_object_set_new(request, "fd", json_integer(fsp_get_io_fd(fsp)));
     json_object_set_new(request, "data", json_string(encoded_data));
     json_object_set_new(request, "offset", json_integer(offset));
@@ -404,8 +410,8 @@ static ssize_t tracim_pwrite(vfs_handle_struct *handle, files_struct *fsp,
 
 static int tracim_stat(vfs_handle_struct *handle, struct smb_filename *smb_fname)
 {
-	LOG_DEBUG1("Tracim: tracim_stat().\n");
     struct tracim_data *data = get_tracim_data(handle);
+	DEBUG(0, ("Tracim: tracim_stat(%s, %s).\n", data->user, smb_fname->base_name));
     json_t *request, *response, *success_obj, *stat_obj;
     int result = -1;
     
@@ -415,7 +421,8 @@ static int tracim_stat(vfs_handle_struct *handle, struct smb_filename *smb_fname
     
     /* Create JSON request */
     request = json_object();
-    json_object_set_new(request, "operation", json_string("stat"));
+    json_object_set_new(request, "op", json_string("stat"));
+    json_object_set_new(request, "user", json_string(data->user));
     json_object_set_new(request, "path", json_string(smb_fname->base_name));
     
     /* Send request */
@@ -460,7 +467,7 @@ static int tracim_unlinkat(vfs_handle_struct *handle,
                            const struct smb_filename *smb_fname,
                            int flags)
 {
-	LOG_DEBUG1("Tracim: tracim_unlinkat().\n");
+	DEBUG(0, ("Tracim: tracim_unlinkat().\n"));
     struct tracim_data *data = get_tracim_data(handle);
     json_t *request, *response, *success_obj;
     int result = -1;
@@ -471,7 +478,7 @@ static int tracim_unlinkat(vfs_handle_struct *handle,
     
     /* Create JSON request */
     request = json_object();
-    json_object_set_new(request, "operation", json_string("unlink"));
+    json_object_set_new(request, "op", json_string("unlink"));
     json_object_set_new(request, "path", json_string(smb_fname->base_name));
     json_object_set_new(request, "flags", json_integer(flags));
     
@@ -507,8 +514,7 @@ static struct vfs_fn_pointers tracim_functions = {
 
 NTSTATUS vfs_tracim_init(TALLOC_CTX *ctx)
 {
-	LOG_DEBUG1("Tracim: vfs_tracim_init().\n");
-	DEBUG(0, ("tracim: Initializing VFS tracim module\n"));
+	DEBUG(0, ("tracim: vfs_tracim_init()\n"));
 	NTSTATUS (*real_smb_register_vfs)(int, const char *, const struct vfs_fn_pointers *);
 	real_smb_register_vfs = dlsym(RTLD_DEFAULT, "smb_register_vfs");
     if (!real_smb_register_vfs) {
