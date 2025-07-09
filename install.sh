@@ -22,15 +22,16 @@ VFS_C_SOURCE="$PROJECT_NAME.c"
 PWD=$(pwd)
 SAMBA_SOURCE=$PWD/samba
 SRC_DIR="$PWD/src"
-PYTHON_SERVICE_DIR="/usr/local/lib/$PROJECT_NAME"
-SOCKET_PATH="/var/run/$PROJECT_NAME.sock"
+PYTHON_SERVICE_DIR="/tracim/backend/daemons/"
+SOCKET_PATH="/srv/tracim"
 LOG_FILE="/var/log/$PROJECT_NAME.log"
 SYSTEMD_SERVICE_FILE="/etc/systemd/system/$PROJECT_NAME.service"
 OS_SAMBA_MODULES_DIR="/usr/lib/x86_64-linux-gnu/samba/vfs"
 SMB_MODULES_DIR="$SAMBA_SOURCE/source3/modules"
+TRACIM_DOCKER_CONTAINER="tracim-tracim-1"
+
 
 # Create directories if they don't exist
-mkdir -p "$PYTHON_SERVICE_DIR"
 touch "$LOG_FILE"
 chmod 666 "$LOG_FILE"
 
@@ -179,6 +180,8 @@ SO_LIBRARY2="$BASE_NAME.so"
 
 function install_vfs_module {
 	echo "Installing VFS module..."
+	mkdir -p $SOCKET_PATH
+	chmod 777 $SOCKET_PATH
 	src=$SAMBA_SOURCE/bin/modules/vfs/$SO_LIBRARY2
 	if [ -L $src ]; then
 		src=$(readlink -ne $SAMBA_SOURCE/bin/modules/vfs/$SO_LIBRARY2)
@@ -213,50 +216,29 @@ EOF
 	systemctl restart smbd
 }
 
-function install_python_deps {
+function install_samba_vfs_service {
 	# Install Python dependencies
-	echo "Installing Python dependencies..."
-	# TODO : venv : pip3 install typing json
-
-	# Check if your database library needs to be installed
-	# pip3 install your-database-library
-
-	# Install Python dependencies
-	pip3 install --upgrade pip
-	pip3 install json
-	# Add any other dependencies your Python service requires here
-}
-function install_python_service {
-	echo "Installing Python service..."
-	cp vfs_tracim_service.py "$PYTHON_SERVICE_DIR/"
-	chmod 755 "$PYTHON_SERVICE_DIR/vfs_tracim_service.py"
-
-	echo "Creating systemd service..."
-	cat > "$SYSTEMD_SERVICE_FILE" << EOF
-[Unit]
-Description=Database VFS Service for Samba
-After=network.target
-
-[Service]
-ExecStart=/usr/bin/python3 $PYTHON_SERVICE_DIR/vfs_tracim_service.py
-Restart=on-failure
-User=root
-Group=root
-Type=simple
-
-[Install]
-WantedBy=multi-user.target
-EOF
+	docker ps | grep $TRACIM_DOCKER_CONTAINER
+	status=$?
+	if [ "$status" -ne 0 ]; then
+		echo "Starting Tracim docker containers. (it last 1 minute)"
+		nohup docker compose up >docker-compose.log 2>&1 &
+		sleep 60
+	else
+		echo "Tracim docker container is already running."
+	fi
+	echo "Installing Python service in Tracim Docker container..."
+	docker cp $SRC_DIR/samba_vfs_service.py $TRACIM_DOCKER_CONTAINER:/tracim/backend/daemons/
+	docker cp $SRC_DIR/samba_vfs $TRACIM_DOCKER_CONTAINER:/tracim/backend/tracim_backend/lib/
+	docker exec -it $TRACIM_DOCKER_CONTAINER /tracim/backend/tracim_backend/lib/samba_vfs/install.sh
 }
 
 # install_deps
-# load_samba_source
+load_samba_source
 compile_vfs_module
 install_vfs_module
-exit 0
-install_python_deps
-install_python_service
-start_python_service
+install_samba_vfs_service
+
 
 function start_python_service {
 	echo "Starting Python service..."

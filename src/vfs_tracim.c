@@ -55,7 +55,7 @@ extern int log_level;
 #error "SMB_VFS_INTERFACE_VERSION not defined"
 #endif
 
-#define DB_VFS_SOCKET_PATH "/var/run/tracim_service.sock"
+#define DB_VFS_SOCKET_PATH "/srv/tracim/samba_vfs_tracim_service.sock"
 #define MAX_RESPONSE_SIZE 65536
 #define MAX_REQUEST_SIZE 32768
 

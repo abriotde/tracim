@@ -3,22 +3,20 @@ import os
 from typing import Dict, Any, Optional
 import time
 import logging
+from tracim_backend.lib.utils.logger import logger
 
-# Setup logger
-logger = logging.getLogger("db_service")
-
-class DatabaseService:
+class FileSystemService:
     """Interface to the actual database operations."""
     
     def __init__(self):
         # Initialize your database connection here
         # self.db = db_lib.connect()
         self.db = None  # Placeholder - replace with your actual DB connection
-        logger.info("Database service initialized")
+        logger.info(self, "Database service initialized")
     
     def get_file_info(self, path: str, username: str) -> Dict[str, Any]:
         """Get information about a file or directory."""
-        logger.info(f"Getting file info for {path} (user: {username})")
+        logger.info(self, f"Getting file info for {path} (user: {username})")
         
         # This is where you'd call your actual database library
         # return self.db.get_file_info(path, username)
@@ -60,7 +58,7 @@ class DatabaseService:
     
     def open_file(self, path: str, username: str, flags: int, mode: int) -> Dict[str, Any]:
         """Open a file and return a handle to it."""
-        logger.info(f"Opening file {path} (user: {username}, flags: {flags})")
+        logger.info(self, f"Opening file {path} (user: {username}, flags: {flags})")
         
         # Check if file exists and user has permissions
         file_info = self.get_file_info(path, username)
@@ -101,7 +99,7 @@ class DatabaseService:
     
     def read_file(self, handle: int, size: int) -> Dict[str, Any]:
         """Read data from a file."""
-        logger.info(f"Reading from handle {handle}, size {size}")
+        logger.info(self, f"Reading from handle {handle}, size {size}")
         
         if handle not in file_handles:
             return {"success": False, "error": "Invalid file handle"}
@@ -125,7 +123,7 @@ class DatabaseService:
     
     def write_file(self, handle: int, data: str, size: int) -> Dict[str, Any]:
         """Write data to a file."""
-        logger.info(f"Writing to handle {handle}, size {size}")
+        logger.info(self, f"Writing to handle {handle}, size {size}")
         
         if handle not in file_handles:
             return {"success": False, "error": "Invalid file handle"}
@@ -160,7 +158,7 @@ class DatabaseService:
     
     def close_file(self, handle: int) -> Dict[str, Any]:
         """Close a file handle."""
-        logger.info(f"Closing handle {handle}")
+        logger.info(self, f"Closing handle {handle}")
         
         if handle not in file_handles:
             return {"success": False, "error": "Invalid file handle"}
@@ -172,13 +170,13 @@ class DatabaseService:
         file_info = file_handles.pop(handle)
         
         # In a real implementation, you'd commit changes to the database here
-        logger.info(f"Closed file {file_info['path']}")
+        logger.info(self, f"Closed file {file_info['path']}")
         
         return {"success": True}
     
     def open_directory(self, path: str, username: str, mask: str) -> Dict[str, Any]:
         """Open a directory for reading."""
-        logger.info(f"Opening directory {path} (user: {username})")
+        logger.info(self, f"Opening directory {path} (user: {username})")
         
         # Check if directory exists and user has permissions
         dir_info = self.get_file_info(path, username)
@@ -223,7 +221,7 @@ class DatabaseService:
     
     def read_directory(self, handle: int) -> Dict[str, Any]:
         """Read the next entry from a directory."""
-        logger.info(f"Reading from directory handle {handle}")
+        logger.info(self, f"Reading from directory handle {handle}")
         
         if handle not in dir_handles:
             return {"success": False, "error": "Invalid directory handle"}
@@ -257,7 +255,7 @@ class DatabaseService:
     
     def close_directory(self, handle: int) -> Dict[str, Any]:
         """Close a directory handle."""
-        logger.info(f"Closing directory handle {handle}")
+        logger.info(self, f"Closing directory handle {handle}")
         
         if handle not in dir_handles:
             return {"success": False, "error": "Invalid directory handle"}
@@ -267,13 +265,13 @@ class DatabaseService:
         
         # Clean up handle
         dir_info = dir_handles.pop(handle)
-        logger.info(f"Closed directory {dir_info['path']}")
+        logger.info(self, f"Closed directory {dir_info['path']}")
         
         return {"success": True}
 
     def init_connection(self, service: str, user: str) -> Dict[str, Any]:
         """Initialize a new connection."""
-        logger.info(f"Initializing connection for service {service}, user {user}")
+        logger.info(self, f"Initializing connection for service {service}, user {user}")
         
         # This is where you'd call your actual database library to set up the connection
         # return self.db.init_connection(service, user)
@@ -288,12 +286,11 @@ class DatabaseService:
             "username": user,
             "connected_at": time.time()
         }
-        
         return {"success": True, "connection_id": conn_id}
     
     def disconnect(self, conn_id: Optional[int] = None) -> Dict[str, Any]:
         """Close a connection."""
-        logger.info(f"Disconnecting connection {conn_id}")
+        logger.info(self, f"Disconnecting connection {conn_id}")
         
         if conn_id is not None and conn_id in active_connections:
             active_connections.pop(conn_id)
