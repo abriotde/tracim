@@ -126,7 +126,7 @@ class SambaVFSServer:
                 return {
                     "success": True,
                     "size": file_info.get("size", 0),
-                    "mode": (0o755 if file_info.get("is_directory", False) else 0o644),
+                    "mode": (0o40755 if file_info.get("is_directory", False) else 0o00644),
                     "mtime": file_info.get("mtime", int(time.time()))
                 }
             elif op == "open":

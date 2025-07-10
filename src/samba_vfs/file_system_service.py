@@ -24,7 +24,7 @@ class FileSystemService:
         file_infos = {
             "exists": False
         }
-        if path == "/":
+        if path == "/" or path==".":
             file_infos = {
                 "exists": True,
                 "is_directory": True,

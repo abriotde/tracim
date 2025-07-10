@@ -110,8 +110,7 @@ static int connect_to_service(struct tracim_data *data)
     
     ret = connect(data->socket_fd, (struct sockaddr *)&addr, sizeof(addr));
     if (ret < 0) {
-        DEBUG(0, ("tracim: Failed to connect to %s: %s\n", 
-                  data->socket_path, strerror(errno)));
+        DEBUG(0, ("tracim: Failed to connect to %s: %s\n", data->socket_path, strerror(errno)));
         close(data->socket_fd);
         data->socket_fd = -1;
         data->connected = false;
@@ -141,21 +140,29 @@ static json_t *send_request(struct tracim_data *data, json_t *request)
         DEBUG(0, ("tracim: Failed to serialize JSON request\n"));
         return NULL;
     }
+    bytes_received = recv(data->socket_fd, response_buf, sizeof(response_buf) - 1, MSG_DONTWAIT);
+	if (bytes_received>0) {
+        DEBUG(0, ("tracim: Empty the buffer of '%s'\n", response_buf));
+	}
     
     /* Send request */
 	DEBUG(0, ("tracim: Sending request: %s\n", request_str));
-    bytes_sent = send(data->socket_fd, request_str, strlen(request_str), 0);
-    if (bytes_sent < 0) {
-        DEBUG(0, ("tracim: Failed to send request: %s\n", strerror(errno)));
+	flock(data->socket_fd, LOCK_EX);
+	ssize_t tosend = strlen(request_str);
+    bytes_sent = send(data->socket_fd, request_str, tosend, 0);
+	flock(data->socket_fd, LOCK_UN);
+    free(request_str);
+    if (bytes_sent < tosend) {
+        DEBUG(0, ("tracim: Failed to send request: sended %ld bytes while %ld bytes to send : %s\n",
+			bytes_sent, tosend, strerror(errno)));
         data->connected = false;
-        free(request_str);
         return NULL;
     }
     send(data->socket_fd, "\n", 1, 0);
-    free(request_str);
-
     /* Receive response */
-    bytes_received = recv(data->socket_fd, response_buf, sizeof(response_buf) - 1, 0);
+	// flock(data->socket_fd, LOCK_EX);
+    bytes_received = recv(data->socket_fd, response_buf, sizeof(response_buf) - 1, 0); // flag=MSG_WAITALL?;
+	// flock(data->socket_fd, LOCK_UN);
     if (bytes_received < 0) {
         DEBUG(0, ("tracim: Failed to receive response: %s\n", strerror(errno)));
         data->connected = false;
@@ -207,7 +214,7 @@ static int tracim_connect(vfs_handle_struct *handle, const char *service, const 
     SMB_VFS_HANDLE_SET_DATA(handle, data, NULL, struct tracim_data, return -1);
     
     DEBUG(0, ("tracim: Connected to service %s, socket: %s\n", service, socket_path));
-    return SMB_VFS_NEXT_CONNECT(handle, service, user);
+    return 0; // SMB_VFS_NEXT_CONNECT(handle, service, user);
 }
 
 static void tracim_disconnect(vfs_handle_struct *handle)
@@ -221,7 +228,7 @@ static void tracim_disconnect(vfs_handle_struct *handle)
         data->connected = false;
     }
     
-    SMB_VFS_NEXT_DISCONNECT(handle);
+    // SMB_VFS_NEXT_DISCONNECT(handle);
 }
 
 /**
@@ -258,7 +265,7 @@ static int tracim_openat(vfs_handle_struct *handle,
     json_decref(request);
     if (!response) {
         DEBUG(0, ("tracim_openat: Failed to get response for open, falling back to next VFS\n"));
-        return SMB_VFS_NEXT_OPENAT(handle, dirfsp, smb_fname, fsp, how);
+        return result; // SMB_VFS_NEXT_OPENAT(handle, dirfsp, smb_fname, fsp, how);
     }
 
     success_obj = json_object_get(response, "success");
@@ -267,12 +274,17 @@ static int tracim_openat(vfs_handle_struct *handle,
         if (fd_obj && json_is_integer(fd_obj)) {
             result = json_integer_value(fd_obj);
             DEBUG(0, ("tracim_openat: Successfully opened %s, fd=%d\n", smb_fname->base_name, result));
-        }
+        } else {
+            DEBUG(0, ("tracim_openat: No fd..."));
+		}
     } else {
         DEBUG(0, ("tracim_openat: Open failed for %s, falling back to next VFS\n", smb_fname->base_name));
     }
     json_decref(response);
-    return result >= 0 ? result : SMB_VFS_NEXT_OPENAT(handle, dirfsp, smb_fname, fsp, how);
+	// DEBUG(0, ("Tracim: tracim_openat() : file is : %s, %ld, %d, %ld.\n", smb_fname->base_name, smb_fname->st.st_ex_size, smb_fname->st.st_ex_mode, smb_fname->st.st_ex_mtime.tv_sec));
+	// result = SMB_VFS_NEXT_OPENAT(handle, dirfsp, smb_fname, fsp, how);
+	// DEBUG(0, ("Tracim: tracim_openat() : file SMB_VFS_NEXT_OPENAT : %s, %ld, %d, %ld : %d.\n", smb_fname->base_name, smb_fname->st.st_ex_size, smb_fname->st.st_ex_mode, smb_fname->st.st_ex_mtime.tv_sec, result));
+    return result; // >= 0 ? result : 
 }
 
 static int tracim_close(vfs_handle_struct *handle, files_struct *fsp)
@@ -280,10 +292,10 @@ static int tracim_close(vfs_handle_struct *handle, files_struct *fsp)
 	DEBUG(0, ("Tracim: tracim_close().\n"));
     struct tracim_data *data = get_tracim_data(handle);
     json_t *request, *response, *success_obj;
-    int result = 0;
+    int result = -1;
     
     if (!data) {
-        return SMB_VFS_NEXT_CLOSE(handle, fsp);
+        return result; // SMB_VFS_NEXT_CLOSE(handle, fsp);
     }
     
     request = json_object();
@@ -293,13 +305,16 @@ static int tracim_close(vfs_handle_struct *handle, files_struct *fsp)
     json_decref(request);
     if (response) {
         success_obj = json_object_get(response, "success");
-        if (success_obj) {
-            result = json_is_true(success_obj) ? 0 : -1;
-        }
+        if (success_obj && json_is_true(success_obj)) {
+            result = 0;
+        } else {
+			result = -1;
+        	success_obj = json_object_get(response, "error");
+			DEBUG(10, ("Tracim: tracim_close() failed: %s\n", json_string_value(success_obj)));
+		}
         json_decref(response);
     }
-    
-    return result >= 0 ? result : SMB_VFS_NEXT_CLOSE(handle, fsp);
+    return 0; // result; // >= 0 ? result : SMB_VFS_NEXT_CLOSE(handle, fsp);
 }
 
 static ssize_t tracim_pread(vfs_handle_struct *handle, files_struct *fsp, 
@@ -315,22 +330,17 @@ static ssize_t tracim_pread(vfs_handle_struct *handle, files_struct *fsp,
         return SMB_VFS_NEXT_PREAD(handle, fsp, data_buf, n, offset);
     }
     
-    /* Create JSON request */
     request = json_object();
     json_object_set_new(request, "op", json_string("read"));
     json_object_set_new(request, "fd", json_integer(fsp_get_io_fd(fsp)));
     json_object_set_new(request, "size", json_integer(n));
     json_object_set_new(request, "offset", json_integer(offset));
-    
-    /* Send request */
     response = send_request(data, request);
     json_decref(request);
-    
     if (!response) {
         return SMB_VFS_NEXT_PREAD(handle, fsp, data_buf, n, offset);
     }
     
-    /* Parse response */
     success_obj = json_object_get(response, "success");
     if (success_obj && json_is_true(success_obj)) {
         data_obj = json_object_get(response, "data");
@@ -362,7 +372,7 @@ static ssize_t tracim_pwrite(vfs_handle_struct *handle, files_struct *fsp,
     char *encoded_data;
     
     if (!data) {
-        return SMB_VFS_NEXT_PWRITE(handle, fsp, data_buf, n, offset);
+        return result; // SMB_VFS_NEXT_PWRITE(handle, fsp, data_buf, n, offset);
     }
     
     /* Encode data as base64 - simplified version */
@@ -401,7 +411,7 @@ static ssize_t tracim_pwrite(vfs_handle_struct *handle, files_struct *fsp,
     }
     
     json_decref(response);
-    return result >= 0 ? result : SMB_VFS_NEXT_PWRITE(handle, fsp, data_buf, n, offset);
+    return result; // >= 0 ? result : SMB_VFS_NEXT_PWRITE(handle, fsp, data_buf, n, offset);
 }
 
 static int tracim_stat(vfs_handle_struct *handle, struct smb_filename *smb_fname)
@@ -423,12 +433,12 @@ static int tracim_stat(vfs_handle_struct *handle, struct smb_filename *smb_fname
     json_decref(request);
     if (!response) {
 		DEBUG(0, ("Tracim: tracim_stat() : fail get response.\n"));
-        return SMB_VFS_NEXT_STAT(handle, smb_fname);
+        return result; // SMB_VFS_NEXT_STAT(handle, smb_fname);
     }
     
     json_obj = json_object_get(response, "success");
     if (json_obj && json_is_true(json_obj)) {
-		DEBUG(0, ("Tracim: tracim_stat() : file was: %d, %d, %d.\n", smb_fname->st.st_ex_size, smb_fname->st.st_ex_mode, smb_fname->st.st_ex_mtime.tv_sec));
+		DEBUG(0, ("Tracim: tracim_stat() : file was: %s, %ld, %d, %ld.\n", smb_fname->base_name, smb_fname->st.st_ex_size, smb_fname->st.st_ex_mode, smb_fname->st.st_ex_mtime.tv_sec));
 		json_obj = json_object_get(response, "size");
 		if (json_obj && json_is_integer(json_obj)) {
 			smb_fname->st.st_ex_size = json_integer_value(json_obj);
@@ -441,7 +451,7 @@ static int tracim_stat(vfs_handle_struct *handle, struct smb_filename *smb_fname
 		if (json_obj && json_is_integer(json_obj)) {
 			smb_fname->st.st_ex_mtime.tv_sec = json_integer_value(json_obj);
 		}
-		DEBUG(0, ("Tracim: tracim_stat() : file is: %d, %d, %d.\n", smb_fname->st.st_ex_size, smb_fname->st.st_ex_mode, smb_fname->st.st_ex_mtime.tv_sec));
+		DEBUG(0, ("Tracim: tracim_stat() : file is: %s, %ld, %d, %ld.\n", smb_fname->base_name, smb_fname->st.st_ex_size, smb_fname->st.st_ex_mode, smb_fname->st.st_ex_mtime.tv_sec));
         result = 0;
 		DEBUG(0, ("Tracim: tracim_stat() : Ok.\n"));
     } else {
@@ -451,7 +461,8 @@ static int tracim_stat(vfs_handle_struct *handle, struct smb_filename *smb_fname
 		DEBUG(0, ("Tracim: tracim_stat() : fail get response : %s.\n", json_string_value(json_obj)));
 	}
     json_decref(response);
-    result = SMB_VFS_NEXT_STAT(handle, smb_fname);
+    // result = SMB_VFS_NEXT_STAT(handle, smb_fname);
+	// DEBUG(0, ("Tracim: tracim_stat() : file SMB_VFS_NEXT_STAT : %s, %ld, %d, %ld.\n", smb_fname->base_name, smb_fname->st.st_ex_size, smb_fname->st.st_ex_mode, smb_fname->st.st_ex_mtime.tv_sec));
 	DEBUG(0, ("Tracim: tracim_stat() : %d.\n", result));
 	return result;
 }
