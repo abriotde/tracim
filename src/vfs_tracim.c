@@ -14,6 +14,7 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <errno.h>
+#include <dirent.h>
 
 extern NTSTATUS smb_register_vfs(int version, const char *name, const struct vfs_fn_pointers *fns);
 
@@ -76,7 +77,7 @@ static struct tracim_data *get_tracim_data(vfs_handle_struct *handle)
     
     SMB_VFS_HANDLE_GET_DATA(handle, data, struct tracim_data, return NULL);
 	if(!data) {
-		LOG_DEBUG1("Tracim: tracim_openat() - No tracim data found.\n");
+		LOG_DEBUG1("Tracim: get_tracim_data() - No tracim data found.\n");
 		return NULL;
 	}
     return data;
@@ -93,7 +94,6 @@ static int connect_to_service(struct tracim_data *data)
         return 0; /* Already connected */
     }
     
-    /* Close existing socket if any */
     if (data->socket_fd >= 0) {
         close(data->socket_fd);
     }
@@ -126,7 +126,6 @@ static int connect_to_service(struct tracim_data *data)
 /* Send JSON request and receive response */
 static json_t *send_request(struct tracim_data *data, json_t *request)
 {
-	LOG_DEBUG1("Tracim: send_request().\n");
     char *request_str;
     char response_buf[MAX_RESPONSE_SIZE];
     ssize_t bytes_sent, bytes_received;
@@ -144,6 +143,7 @@ static json_t *send_request(struct tracim_data *data, json_t *request)
     }
     
     /* Send request */
+	DEBUG(0, ("tracim: Sending request: %s\n", request_str));
     bytes_sent = send(data->socket_fd, request_str, strlen(request_str), 0);
     if (bytes_sent < 0) {
         DEBUG(0, ("tracim: Failed to send request: %s\n", strerror(errno)));
@@ -151,11 +151,9 @@ static json_t *send_request(struct tracim_data *data, json_t *request)
         free(request_str);
         return NULL;
     }
-    
-    /* Send newline delimiter */
     send(data->socket_fd, "\n", 1, 0);
     free(request_str);
-    
+
     /* Receive response */
     bytes_received = recv(data->socket_fd, response_buf, sizeof(response_buf) - 1, 0);
     if (bytes_received < 0) {
@@ -163,9 +161,9 @@ static json_t *send_request(struct tracim_data *data, json_t *request)
         data->connected = false;
         return NULL;
     }
-    
     response_buf[bytes_received] = '\0';
-    
+    DEBUG(0, ("tracim: Received response: %s\n", response_buf));
+
     /* Parse JSON response */
     response = json_loads(response_buf, 0, &error);
     if (!response) {
@@ -226,6 +224,16 @@ static void tracim_disconnect(vfs_handle_struct *handle)
     SMB_VFS_NEXT_DISCONNECT(handle);
 }
 
+/**
+ * @brief Open a file in the Tracim VFS.
+ *
+ * @param handle 
+ * @param dirfsp 
+ * @param smb_fname 
+ * @param fsp 
+ * @param how 
+ * @return int : the file descriptor (fd) if > 0
+ */
 static int tracim_openat(vfs_handle_struct *handle,
                          const struct files_struct *dirfsp,
                          const struct smb_filename *smb_fname,
@@ -236,41 +244,33 @@ static int tracim_openat(vfs_handle_struct *handle,
     DEBUG(0, ("Tracim: tracim_openat(%s).\n", data->user));
     json_t *request, *response, *success_obj, *fd_obj;
     int result = -1;
-
     if (!data) {
+        DEBUG(0, ("tracim_openat: Failed to get VFS tracim data\n"));
         return SMB_VFS_NEXT_OPENAT(handle, dirfsp, smb_fname, fsp, how);
     }
-    
-    /* Create JSON request */
+
     request = json_object();
     json_object_set_new(request, "op", json_string("open"));
     json_object_set_new(request, "path", json_string(smb_fname->base_name));
     json_object_set_new(request, "flags", json_integer(how->flags));
     json_object_set_new(request, "mode", json_integer(how->mode));
-    
-    /* Send request */
     response = send_request(data, request);
     json_decref(request);
-    
     if (!response) {
-        DEBUG(3, ("tracim: Failed to get response for open, falling back to next VFS\n"));
+        DEBUG(0, ("tracim_openat: Failed to get response for open, falling back to next VFS\n"));
         return SMB_VFS_NEXT_OPENAT(handle, dirfsp, smb_fname, fsp, how);
     }
-    
-    /* Parse response */
+
     success_obj = json_object_get(response, "success");
     if (success_obj && json_is_true(success_obj)) {
-        fd_obj = json_object_get(response, "fd");
+        fd_obj = json_object_get(response, "handle");
         if (fd_obj && json_is_integer(fd_obj)) {
             result = json_integer_value(fd_obj);
-            DEBUG(5, ("tracim: Successfully opened %s, fd=%d\n", smb_fname->base_name, result));
+            DEBUG(0, ("tracim_openat: Successfully opened %s, fd=%d\n", smb_fname->base_name, result));
         }
     } else {
-        DEBUG(3, ("tracim: Open failed for %s, falling back to next VFS\n", smb_fname->base_name));
-        json_decref(response);
-        return SMB_VFS_NEXT_OPENAT(handle, dirfsp, smb_fname, fsp, how);
+        DEBUG(0, ("tracim_openat: Open failed for %s, falling back to next VFS\n", smb_fname->base_name));
     }
-    
     json_decref(response);
     return result >= 0 ? result : SMB_VFS_NEXT_OPENAT(handle, dirfsp, smb_fname, fsp, how);
 }
@@ -286,15 +286,11 @@ static int tracim_close(vfs_handle_struct *handle, files_struct *fsp)
         return SMB_VFS_NEXT_CLOSE(handle, fsp);
     }
     
-    /* Create JSON request */
     request = json_object();
     json_object_set_new(request, "op", json_string("close"));
-    json_object_set_new(request, "fd", json_integer(fsp_get_io_fd(fsp)));
-    
-    /* Send request */
+    json_object_set_new(request, "handle", json_integer(fsp_get_io_fd(fsp)));
     response = send_request(data, request);
     json_decref(request);
-    
     if (response) {
         success_obj = json_object_get(response, "success");
         if (success_obj) {
@@ -303,7 +299,7 @@ static int tracim_close(vfs_handle_struct *handle, files_struct *fsp)
         json_decref(response);
     }
     
-    return SMB_VFS_NEXT_CLOSE(handle, fsp);
+    return result >= 0 ? result : SMB_VFS_NEXT_CLOSE(handle, fsp);
 }
 
 static ssize_t tracim_pread(vfs_handle_struct *handle, files_struct *fsp, 
@@ -412,54 +408,52 @@ static int tracim_stat(vfs_handle_struct *handle, struct smb_filename *smb_fname
 {
     struct tracim_data *data = get_tracim_data(handle);
 	DEBUG(0, ("Tracim: tracim_stat(%s, %s).\n", data->user, smb_fname->base_name));
-    json_t *request, *response, *success_obj, *stat_obj;
+    json_t *request, *response, *json_obj, *stat_obj;
     int result = -1;
-    
     if (!data) {
+		DEBUG(0, ("Tracim: tracim_stat() : fail get data.\n"));
         return SMB_VFS_NEXT_STAT(handle, smb_fname);
     }
     
-    /* Create JSON request */
     request = json_object();
     json_object_set_new(request, "op", json_string("stat"));
     json_object_set_new(request, "user", json_string(data->user));
     json_object_set_new(request, "path", json_string(smb_fname->base_name));
-    
-    /* Send request */
     response = send_request(data, request);
     json_decref(request);
-    
     if (!response) {
+		DEBUG(0, ("Tracim: tracim_stat() : fail get response.\n"));
         return SMB_VFS_NEXT_STAT(handle, smb_fname);
     }
     
-    /* Parse response */
-    success_obj = json_object_get(response, "success");
-    if (success_obj && json_is_true(success_obj)) {
-        stat_obj = json_object_get(response, "stat");
-        if (stat_obj && json_is_object(stat_obj)) {
-            json_t *size_obj, *mode_obj, *mtime_obj;
-            
-            /* Parse stat information */
-            size_obj = json_object_get(stat_obj, "size");
-            if (size_obj && json_is_integer(size_obj)) {
-                smb_fname->st.st_ex_size = json_integer_value(size_obj);
-            }
-            mode_obj = json_object_get(stat_obj, "mode");
-            if (mode_obj && json_is_integer(mode_obj)) {
-                smb_fname->st.st_ex_mode = json_integer_value(mode_obj);
-            }
-            mtime_obj = json_object_get(stat_obj, "mtime");
-            if (mtime_obj && json_is_integer(mtime_obj)) {
-                smb_fname->st.st_ex_mtime.tv_sec = json_integer_value(mtime_obj);
-            }
-            
-            result = 0;
-        }
-    }
-    
+    json_obj = json_object_get(response, "success");
+    if (json_obj && json_is_true(json_obj)) {
+		DEBUG(0, ("Tracim: tracim_stat() : file was: %d, %d, %d.\n", smb_fname->st.st_ex_size, smb_fname->st.st_ex_mode, smb_fname->st.st_ex_mtime.tv_sec));
+		json_obj = json_object_get(response, "size");
+		if (json_obj && json_is_integer(json_obj)) {
+			smb_fname->st.st_ex_size = json_integer_value(json_obj);
+		}
+		json_obj = json_object_get(response, "mode");
+		if (json_obj && json_is_integer(json_obj)) {
+			smb_fname->st.st_ex_mode = json_integer_value(json_obj);
+		}
+		json_obj = json_object_get(response, "mtime");
+		if (json_obj && json_is_integer(json_obj)) {
+			smb_fname->st.st_ex_mtime.tv_sec = json_integer_value(json_obj);
+		}
+		DEBUG(0, ("Tracim: tracim_stat() : file is: %d, %d, %d.\n", smb_fname->st.st_ex_size, smb_fname->st.st_ex_mode, smb_fname->st.st_ex_mtime.tv_sec));
+        result = 0;
+		DEBUG(0, ("Tracim: tracim_stat() : Ok.\n"));
+    } else {
+		errno = ENOENT; // File not found
+		result = 1;
+		json_obj = json_object_get(response, "error");
+		DEBUG(0, ("Tracim: tracim_stat() : fail get response : %s.\n", json_string_value(json_obj)));
+	}
     json_decref(response);
-    return result >= 0 ? result : SMB_VFS_NEXT_STAT(handle, smb_fname);
+    result = SMB_VFS_NEXT_STAT(handle, smb_fname);
+	DEBUG(0, ("Tracim: tracim_stat() : %d.\n", result));
+	return result;
 }
 
 static int tracim_unlinkat(vfs_handle_struct *handle,
@@ -500,6 +494,151 @@ static int tracim_unlinkat(vfs_handle_struct *handle,
     return result >= 0 ? result : SMB_VFS_NEXT_UNLINKAT(handle, dirfsp, smb_fname, flags);
 }
 
+/* Structure to hold our custom DIR state */
+struct tracim_dir {
+    DIR *real_dir;
+    int static_index;
+};
+
+/* Helper function to create a custom DIR wrapper */
+static DIR *create_static_dir(void) {
+    struct tracim_dir *custom_dir;
+
+    custom_dir = talloc_zero(NULL, struct tracim_dir);
+    if (!custom_dir) {
+        errno = ENOMEM;
+        return NULL;
+    }
+    
+    custom_dir->real_dir = NULL;
+    custom_dir->static_index = 0;
+
+    return (DIR *)custom_dir;
+}
+/**
+ * @brief Call API to open a directory in the Tracim VFS. There is no file list.
+ * 
+ * @param handle 
+ * @param fsp 
+ * @param mask 
+ * @param attr 
+ * @return DIR* : It's a integer as a "file descriptor".
+ */
+static DIR *tracim_opendir(vfs_handle_struct *handle,
+                                    files_struct *fsp,
+                                    const char *mask,
+                                    uint32_t attr)
+{
+	DEBUG(0, ("Tracim: tracim_opendir(%s).\n", fsp->fsp_name->base_name));
+    DIR *result = NULL;
+    json_t *request, *response, *success_obj, *json_obj;
+    struct tracim_data *data = get_tracim_data(handle);
+    
+    request = json_object();
+    json_object_set_new(request, "op", json_string("opendir"));
+    json_object_set_new(request, "path", json_string(fsp->fsp_name->base_name));
+    json_object_set_new(request, "attr", json_integer(attr));
+
+    response = send_request(data, request);
+    json_decref(request);
+    success_obj = json_object_get(response, "success");
+	if(success_obj) {
+		if (json_is_true(success_obj)) {
+			json_obj = json_object_get(response, "handle");
+			int i = json_integer_value(json_obj);
+			DEBUG(10, ("Tracim: tracim_opendir successfull for fd=%d\n", i));
+			result = (DIR *)i;
+		} else {
+			json_obj = json_object_get(response, "error");
+			DEBUG(10, ("Tracim: tracim_opendir failed: %s\n", json_string_value(json_obj)));
+		}
+	} else {
+		DEBUG(10, ("Tracim: tracim_opendir failed\n"));
+	}
+    json_decref(response);
+
+    /* result = SMB_VFS_NEXT_FDOPENDIR(handle, fsp, mask, attr);
+    if (result == NULL) {
+        DEBUG(1, ("vfs_example_fdopendir: SMB_VFS_NEXT_FDOPENDIR failed: %s\n",
+                  strerror(errno)));
+        return NULL;
+    }*/
+
+    DEBUG(10, ("Tracim: tracim_opendir ended for %s\n", fsp_str_dbg(fsp)));
+    
+    return result;
+}
+/**
+ * @brief Call on a DIR* to list all the files into the directory. At each call, give next entry.
+ * 
+ * @param handle 
+ * @param dirfsp 
+ * @param dirp 
+ * @return struct dirent* : directory entry one by one.
+ */
+static struct dirent *tracim_readdir(vfs_handle_struct *handle,
+                                          struct files_struct *dirfsp,
+                                          DIR *dirp)
+{
+	DEBUG(0, ("Tracim: tracim_readdir().\n"));
+	struct dirent * result = NULL;
+	struct tracim_data *data = get_tracim_data(handle);
+	json_t *request, *response, *success_obj, *entry_obj;
+	size_t i;
+
+    request = json_object();
+    json_object_set_new(request, "op", json_string("readdir"));
+    json_object_set_new(request, "handle", json_integer((int)dirp));
+    json_object_set_new(request, "user", json_string(data->user));
+    response = send_request(data, request);
+    json_decref(request);
+	if (!response) {
+		DEBUG(3, ("tracim: Failed to get response for readdir, falling back to next VFS\n"));
+		return SMB_VFS_NEXT_READDIR(handle, dirfsp, dirp);
+	}
+    success_obj = json_object_get(response, "success");
+	if (!success_obj) {
+		if (json_is_true(success_obj)) {
+			result = talloc(talloc_tos(), struct dirent);
+			if (!result) {
+				errno = ENOMEM;
+				return NULL;
+			}
+			entry_obj = json_object_get(response, "name");
+			strncpy(result->d_name, json_string_value(entry_obj), sizeof(result->d_name) - 1);
+			result->d_name[sizeof(result->d_name) - 1] = '\0';
+			entry_obj = json_object_get(response, "ino");
+			result->d_ino = json_integer_value(entry_obj);
+			entry_obj = json_object_get(response, "type");
+			result->d_type = (unsigned char)json_integer_value(entry_obj);
+		} else {
+			entry_obj = json_object_get(response, "error");
+			DEBUG(10, ("Tracim: tracim_readdir failed: %s\n", json_string_value(entry_obj)));
+		}
+	} else {
+		DEBUG(10, ("Tracim: tracim_readdir failed\n"));
+	}
+    json_decref(response);
+
+	DEBUG(10, ("tracim_readdir: '%s'\n", result->d_name));
+
+	// result = SMB_VFS_NEXT_READDIR(handle, dirp, sbuf);
+
+    return result;
+}
+
+/* Custom closedir function to clean up our custom structure */
+static int tracim_closedir(vfs_handle_struct *handle,
+                                DIR *dirp)
+{
+    struct vfs_example_dir *custom_dir = (struct vfs_example_dir *)dirp;
+    int result = 0;
+
+    DEBUG(0, ("Tracim: tracim_closedir called\n"));
+	
+    return result;
+}
+
 /* VFS operations structure for Samba 4.x */
 static struct vfs_fn_pointers tracim_functions = {
     .connect_fn = tracim_connect,
@@ -510,6 +649,9 @@ static struct vfs_fn_pointers tracim_functions = {
     .pwrite_fn = tracim_pwrite,
     .stat_fn = tracim_stat,
     .unlinkat_fn = tracim_unlinkat,
+	.fdopendir_fn = tracim_opendir,
+    .readdir_fn = tracim_readdir,
+    .closedir_fn = tracim_closedir
 };
 
 NTSTATUS vfs_tracim_init(TALLOC_CTX *ctx)

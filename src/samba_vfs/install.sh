@@ -3,13 +3,14 @@
 PROJECT_NAME=samba_vfs_service
 SUPERVISOR_CONF="/tracim/tools_docker/Debian_Uwsgi/supervisord_tracim.conf"
 
-grep "$PROJECT_NAME" $SUPERVISOR_CONF >> /dev/null
-status=$?
-if [ "$status" -eq 0 ]; then
-	echo "Module $PROJECT_NAME already exists in $SUPERVISOR_CONF."
-else
-	echo "Adding samba vfs service to supervisord_tracim.conf... "
-	cat >>$SUPERVISOR_CONF <<EOF
+function configure_supervisor {
+	grep "$PROJECT_NAME" $SUPERVISOR_CONF >/dev/null
+	status=$?
+	if [ "$status" -eq 0 ]; then
+		echo "Module $PROJECT_NAME already exists in $SUPERVISOR_CONF."
+	else
+		echo "Adding samba vfs service to supervisord_tracim.conf... "
+		cat >>$SUPERVISOR_CONF <<EOF
 
 # samba vfs service
 [program:samba_vfs_service]
@@ -22,7 +23,20 @@ autostart=false
 autorestart=false
 environment=TRACIM_CONF_PATH=/etc/tracim/development.ini
 EOF
-fi
-supervisorctl reload
-supervisorctl stop samba_vfs_service
-supervisorctl start samba_vfs_service
+	fi
+}
+
+function reload_supervisor {
+	supervisorctl reload
+	supervisorctl status $PROJECT_NAME >/dev/null
+	status=$?
+	if [ "$status" -eq 0 ]; then
+		echo "Module $PROJECT_NAME already running, stopping it."
+		supervisorctl stop $PROJECT_NAME
+	fi
+	echo "Starting $PROJECT_NAME."
+	supervisorctl start $PROJECT_NAME
+}
+
+configure_supervisor
+# reload_supervisor

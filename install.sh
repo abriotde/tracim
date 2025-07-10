@@ -189,7 +189,7 @@ function install_vfs_module {
 	cp $src "$OS_SAMBA_MODULES_DIR/$SO_LIBRARY2"
 	chmod 755 "$OS_SAMBA_MODULES_DIR/$SO_LIBRARY2"
 
-	SHARE_DIR="/var/lib/samba/$BASE_NAME"
+	SHARE_DIR="/"
 	SMB_CONF_FILE="/etc/samba/smb.conf"
 	grep "vfs objects = $BASE_NAME" $SMB_CONF_FILE >> /dev/null
 	status=$?
@@ -210,7 +210,7 @@ EOF
 	fi
 	# Create directory for the share
 	mkdir -p $SHARE_DIR
-	chmod 777 $SHARE_DIR
+	# chmod 777 $SHARE_DIR
 
 	echo "Restarting Samba..."
 	systemctl restart smbd
@@ -233,31 +233,17 @@ function install_samba_vfs_service {
 	docker exec -it $TRACIM_DOCKER_CONTAINER /tracim/backend/tracim_backend/lib/samba_vfs/install.sh
 }
 
+function run_samba_vfs_service {
+	echo "Starting Python service..."
+	docker exec -it $TRACIM_DOCKER_CONTAINER bash -c "export TRACIM_CONF_PATH=/etc/tracim/development.ini;python3 /tracim/backend/daemons/samba_vfs_service.py 2>&1|tee /srv/tmpalb.log"
+}
+
 # install_deps
-load_samba_source
+# load_samba_source
 compile_vfs_module
 install_vfs_module
 install_samba_vfs_service
-
-
-function start_python_service {
-	echo "Starting Python service..."
-	systemctl daemon-reload
-	systemctl enable vfs_tracim_service
-	systemctl start vfs_tracim_service
-}
-
+run_samba_vfs_service
 
 echo "===== Deployment completed ====="
-echo "The VFS module has been installed and configured."
-echo "The Python service is running as a systemd service."
-echo "Samba has been configured with a [database] share."
-echo ""
-echo "To check the status of the Python service:"
-echo "  systemctl status ${PROJECT_NAME}_service"
-echo ""
-echo "To view logs:"
-echo "  tail -f $LOG_FILE"
-echo ""
-echo "To test the share, connect to:"
-echo ""
+echo "The Samba VFS module has been installed and configured in Tracim."

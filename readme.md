@@ -15,7 +15,14 @@ https://wiki.samba.org/index.php/Writing_a_Samba_VFS_Module
 
 ## For Tracim Python part:
 
+WebDav
+
 https://demo.tracim.fr/api/doc/
+
+
+./backend/tracim_backend/lib/webdav/resources.py
+
+https://github.com/tracim/tracim/blob/develop/backend/tracim_backend/lib/core/content.py
 - create() (créé un contenu vide)
 - get_one()
 - get_all() (pour lister les contenus enfant d'un espace et/ou d'un dossier)

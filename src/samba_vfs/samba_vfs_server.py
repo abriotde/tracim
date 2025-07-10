@@ -81,13 +81,16 @@ class SambaVFSServer:
                     break
                 # Parse request
                 try:
-                    request = json.loads(data.decode('utf-8'))
+                    d = data.decode('utf-8').strip()
+                    if d == "":
+                        logger.warning(self, f"Received empty data from client {client_id}")
+                    else:
+                        request = json.loads(d)
                 except json.JSONDecodeError as e:
-                    logger.error(self, f"Invalid JSON: {e}")
+                    logger.error(self, f"Invalid JSON: '{d}' : error {e}")
                     response = {"success": False, "error": "Invalid JSON request"}
                     conn.sendall(json.dumps(response).encode('utf-8'))
                     continue
-                # Process request
                 response = self.process_request(request)
                 
                 # Send response
@@ -102,7 +105,6 @@ class SambaVFSServer:
         """Process a client request and return a response."""
         op = request.get("op")
         logger.debug(self, f"Processing request: {op}")
-        
         try:
             if op == "init":
                 return self._fs_service.init_connection(
@@ -118,12 +120,13 @@ class SambaVFSServer:
                 )
                 
                 if not file_info.get("exists", False):
+                    logger.warning(self, f"process_request(stat) : File not found: {request.get('path', '')}")
                     return {"success": False, "error": "File not found"}
-                
+                logger.warning(self, f"process_request(stat) : File = {file_info}")
                 return {
                     "success": True,
                     "size": file_info.get("size", 0),
-                    "is_directory": file_info.get("is_directory", False),
+                    "mode": (0o755 if file_info.get("is_directory", False) else 0o644),
                     "mtime": file_info.get("mtime", int(time.time()))
                 }
             elif op == "open":
@@ -163,7 +166,7 @@ class SambaVFSServer:
                     request.get("handle", -1)
                 )
             else:
-                logger.warning(self, f"Unknown operation: {op}")
+                logger.warning(self, f"process_request({op}) : Unknown operation")
                 return {"success": False, "error": f"Unknown operation: {op}"}
         except Exception as e:
             logger.error(self, f"Error processing request {op}: {e}")

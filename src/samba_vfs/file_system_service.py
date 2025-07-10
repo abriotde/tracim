@@ -13,48 +13,46 @@ class FileSystemService:
         # self.db = db_lib.connect()
         self.db = None  # Placeholder - replace with your actual DB connection
         logger.info(self, "Database service initialized")
-    
+        self.file_handles = {}  # Store open file handles
+        self.dir_handles = {}  # Store open directory handles
+        self.active_connections = {}  # Store active connections
+        self.next_handle_id = 1  # Incremental ID for file and directory handles, do not use 0 as it can be confused to NULL in C VFS cast.
+
     def get_file_info(self, path: str, username: str) -> Dict[str, Any]:
         """Get information about a file or directory."""
         logger.info(self, f"Getting file info for {path} (user: {username})")
-        
-        # This is where you'd call your actual database library
-        # return self.db.get_file_info(path, username)
-        
-        # Placeholder implementation - replace with actual database calls
-        # This simulates a filesystem with user-specific paths
+        file_infos = {
+            "exists": False
+        }
         if path == "/":
-            return {
+            file_infos = {
                 "exists": True,
                 "is_directory": True,
-                "size": 0,
+                "size": 16,
                 "mtime": int(time.time()),
                 "can_read": True,
                 "can_write": True
             }
         elif path == f"/user_{username}":
-            return {
+            file_infos = {
                 "exists": True,
                 "is_directory": True,
-                "size": 0,
+                "size": 16,
                 "mtime": int(time.time()),
                 "can_read": True,
                 "can_write": True
             }
         elif path == f"/user_{username}/test.txt":
-            return {
+            file_infos = {
                 "exists": True,
                 "is_directory": False,
-                "size": 13,
+                "size": 1324,
                 "mtime": int(time.time()),
                 "can_read": True,
                 "can_write": True,
                 "content": "Hello, world!"
             }
-        else:
-            return {
-                "exists": False
-            }
+        return file_infos
     
     def open_file(self, path: str, username: str, flags: int, mode: int) -> Dict[str, Any]:
         """Open a file and return a handle to it."""
@@ -79,11 +77,10 @@ class FileSystemService:
         # return self.db.open_file(path, username, flags, mode)
         
         # Placeholder - store file info for later operations
-        global next_handle_id
-        handle_id = next_handle_id
-        next_handle_id += 1
+        handle_id = self.next_handle_id
+        self.next_handle_id += 1
         
-        file_handles[handle_id] = {
+        self.file_handles[handle_id] = {
             "path": path,
             "username": username,
             "flags": flags,
@@ -101,10 +98,10 @@ class FileSystemService:
         """Read data from a file."""
         logger.info(self, f"Reading from handle {handle}, size {size}")
         
-        if handle not in file_handles:
+        if handle not in self.file_handles:
             return {"success": False, "error": "Invalid file handle"}
         
-        file_info = file_handles[handle]
+        file_info = self.file_handles[handle]
         content = file_info["content"]
         position = file_info["position"]
         
@@ -125,10 +122,10 @@ class FileSystemService:
         """Write data to a file."""
         logger.info(self, f"Writing to handle {handle}, size {size}")
         
-        if handle not in file_handles:
+        if handle not in self.file_handles:
             return {"success": False, "error": "Invalid file handle"}
         
-        file_info = file_handles[handle]
+        file_info = self.file_handles[handle]
         
         # Check write permission based on flags
         write_allowed = (file_info["flags"] & os.O_WRONLY) or (file_info["flags"] & os.O_RDWR)
@@ -158,16 +155,16 @@ class FileSystemService:
     
     def close_file(self, handle: int) -> Dict[str, Any]:
         """Close a file handle."""
-        logger.info(self, f"Closing handle {handle}")
+        logger.info(self, f"Closing file {handle}")
         
-        if handle not in file_handles:
+        if handle not in self.file_handles:
             return {"success": False, "error": "Invalid file handle"}
         
         # This is where you'd call your actual database library
         # return self.db.close_file(handle)
         
         # Clean up handle
-        file_info = file_handles.pop(handle)
+        file_info = self.file_handles.pop(handle)
         
         # In a real implementation, you'd commit changes to the database here
         logger.info(self, f"Closed file {file_info['path']}")
@@ -193,9 +190,8 @@ class FileSystemService:
         # return self.db.open_directory(path, username, mask)
         
         # Placeholder - set up directory contents for readdir
-        global next_handle_id
-        handle_id = next_handle_id
-        next_handle_id += 1
+        handle_id = self.next_handle_id
+        self.next_handle_id += 1
         
         # Simulate directory entries based on path
         entries = []
@@ -206,7 +202,7 @@ class FileSystemService:
             # User's home directory - show some files
             entries = ["test.txt", "docs"]
         
-        dir_handles[handle_id] = {
+        self.dir_handles[handle_id] = {
             "path": path,
             "username": username,
             "mask": mask,
@@ -223,10 +219,10 @@ class FileSystemService:
         """Read the next entry from a directory."""
         logger.info(self, f"Reading from directory handle {handle}")
         
-        if handle not in dir_handles:
+        if handle not in self.dir_handles:
             return {"success": False, "error": "Invalid directory handle"}
         
-        dir_info = dir_handles[handle]
+        dir_info = self.dir_handles[handle]
         entries = dir_info["entries"]
         position = dir_info["position"]
         
@@ -257,14 +253,14 @@ class FileSystemService:
         """Close a directory handle."""
         logger.info(self, f"Closing directory handle {handle}")
         
-        if handle not in dir_handles:
+        if handle not in self.dir_handles:
             return {"success": False, "error": "Invalid directory handle"}
         
         # This is where you'd call your actual database library
         # return self.db.close_directory(handle)
         
         # Clean up handle
-        dir_info = dir_handles.pop(handle)
+        dir_info = self.dir_handles.pop(handle)
         logger.info(self, f"Closed directory {dir_info['path']}")
         
         return {"success": True}
@@ -277,11 +273,10 @@ class FileSystemService:
         # return self.db.init_connection(service, user)
         
         # Placeholder
-        global next_handle_id
-        conn_id = next_handle_id
-        next_handle_id += 1
+        conn_id = self.next_handle_id
+        self.next_handle_id += 1
         
-        active_connections[conn_id] = {
+        self.active_connections[conn_id] = {
             "service": service,
             "username": user,
             "connected_at": time.time()
@@ -291,10 +286,10 @@ class FileSystemService:
     def disconnect(self, conn_id: Optional[int] = None) -> Dict[str, Any]:
         """Close a connection."""
         logger.info(self, f"Disconnecting connection {conn_id}")
-        
-        if conn_id is not None and conn_id in active_connections:
-            active_connections.pop(conn_id)
-        
+
+        if conn_id is not None and conn_id in self.active_connections:
+            self.active_connections.pop(conn_id)
+
         # This is where you'd call your actual database library to clean up
         # return self.db.disconnect(conn_id)
         
