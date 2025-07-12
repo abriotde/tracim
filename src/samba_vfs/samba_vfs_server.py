@@ -123,11 +123,17 @@ class SambaVFSServer:
                     logger.warning(self, f"process_request(stat) : File not found: {request.get('path', '')}")
                     return {"success": False, "error": "File not found"}
                 logger.warning(self, f"process_request(stat) : File = {file_info}")
+                is_dir = file_info.get("is_directory", False)
+                mode = file_info.get("mode", (0o755 if is_dir else 0o644))
+                mtime = file_info.get("mtime", int(time.time()))
                 return {
                     "success": True,
                     "size": file_info.get("size", 0),
-                    "mode": (0o40755 if file_info.get("is_directory", False) else 0o00644),
-                    "mtime": file_info.get("mtime", int(time.time()))
+                    "is_dir": is_dir,
+                    "mode": mode,
+                    "mtime": file_info.get("mtime", int(time.time())),
+                    "ctime": file_info.get("ctime", mtime),
+                    "atime": file_info.get("atime", mtime),
                 }
             elif op == "open":
                 return self._fs_service.open_file(

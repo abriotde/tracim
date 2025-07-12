@@ -24,7 +24,7 @@ class FileSystemService:
         file_infos = {
             "exists": False
         }
-        if path == "/" or path==".":
+        if path in ["/", ".", "/var/lib/samba/tracim"]:
             file_infos = {
                 "exists": True,
                 "is_directory": True,
