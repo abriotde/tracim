@@ -461,6 +461,7 @@ int tracim_stat_sub(json_t *request, vfs_handle_struct *handle, SMB_STRUCT_STAT 
     // result = SMB_VFS_NEXT_STAT(handle, smb_fname);
 	// DEBUG(0, ("Tracim: tracim_stat() : file SMB_VFS_NEXT_STAT : %ld, %d, %ld.\n", sbuf->st_ex_size, sbuf->st_ex_mode, sbuf->st_ex_mtime.tv_sec));
 	DEBUG(0, ("Tracim: tracim_stat() : %d.\n", result));
+	return result;
 }
 
 /**
