@@ -128,9 +128,13 @@ static json_t *send_request(struct tracim_data *data, json_t *request)
 	}
     
     /* Send request */
-	DEBUG(0, ("tracim: Sending request: %s\n", request_str));
-	flock(data->socket_fd, LOCK_EX);
+	int len = strlen(request_str);
+	if (len>=MAX_REQUEST_SIZE) { // assert()
+		DEBUG(0, ("tracim: ERROR : request too long : %s (%d)\n", request_str, len));
+	}
+	DEBUG(0, ("tracim: Sending request: %s (%d)\n", request_str, len));
 	ssize_t tosend = strlen(request_str);
+	flock(data->socket_fd, LOCK_EX);
     bytes_sent = send(data->socket_fd, request_str, tosend, 0);
 	flock(data->socket_fd, LOCK_UN);
     free(request_str);
@@ -151,15 +155,22 @@ static json_t *send_request(struct tracim_data *data, json_t *request)
         return NULL;
     }
     response_buf[bytes_received] = '\0';
-    DEBUG(0, ("tracim: Received response: %s\n", response_buf));
+    DEBUG(0, ("tracim: Received response: %s (%d)\n", response_buf, bytes_received));
 
     /* Parse JSON response */
     response = json_loads(response_buf, 0, &error);
     if (!response) {
-        DEBUG(0, ("tracim: Failed to parse JSON response: %s\n", error.text));
-        return NULL;
+		response = json_loads(response_buf, 0, &error);
+		char * pt = response_buf+2;
+		while (*pt!='{' && pt<response_buf+sizeof(response_buf)) pt++;
+		*pt = '\0';
+        DEBUG(0, ("tracim: Failed to parse JSON response: retry %s\n", response_buf));
+		response = json_loads(response_buf, 0, &error);
+		if (!response) {
+			DEBUG(0, ("tracim: Failed to parse JSON response: %s\n", error.text));
+        	return NULL;
+		}
     }
-    
     return response;
 }
 

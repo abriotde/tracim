@@ -16,6 +16,11 @@ from tracim_backend.lib.utils.logger import logger
 class SambaVFSServer:
     """Server that listens on a Unix domain socket and handles requests."""
 
+    MAX_RESPONSE_SIZE = 32768
+    MAX_REQUEST_SIZE = 65536
+    SOCKET_ENCODING = "utf-8"
+    SOCKET_ENCODING = "ascii"
+
     def __init__(self, service, socket:str=None):
         self._socket_path = socket
         self._fs_service = service
@@ -72,16 +77,18 @@ class SambaVFSServer:
         """Handle a client connection."""
         client_id = threading.get_ident()
         logger.info(self, f"New client connection: {client_id}")
-
         try:
             while self.running:
                 # Receive data
-                data = conn.recv(8192)
+                data = b''
+                data = conn.recv(self.MAX_REQUEST_SIZE)
                 if not data:
+                    logger.info(self, f"Recv nothing.")
                     break
+
                 # Parse request
                 try:
-                    d = data.decode('utf-8').strip()
+                    d = data.decode(encoding=self.SOCKET_ENCODING).strip()
                     if d == "":
                         logger.warning(self, f"Received empty data from client {client_id}")
                     else:
@@ -89,12 +96,15 @@ class SambaVFSServer:
                 except json.JSONDecodeError as e:
                     logger.error(self, f"Invalid JSON: '{d}' : error {e}")
                     response = {"success": False, "error": "Invalid JSON request"}
-                    conn.sendall(json.dumps(response).encode('utf-8'))
+                    conn.sendall(json.dumps(response).encode(encoding=self.SOCKET_ENCODING))
                     continue
                 response = self.process_request(request)
                 
                 # Send response
-                conn.sendall(json.dumps(response).encode('utf-8'))
+                resp = json.dumps(response).encode(encoding=self.SOCKET_ENCODING)
+                logger.warning(self, f"send response {resp}")
+                assert(len(resp)<self.MAX_RESPONSE_SIZE)
+                conn.sendall(resp)
         except Exception as e:
             logger.error(self, f"Error handling client {client_id}: {e}")
         finally:
@@ -104,7 +114,7 @@ class SambaVFSServer:
     def process_request(self, request: Dict[str, Any]) -> Dict[str, Any]:
         """Process a client request and return a response."""
         op = request.get("op")
-        logger.debug(self, f"Processing request: {op}")
+        logger.debug(self, f"Processing request: {op} : {request}")
         try:
             if op == "init":
                 return self._fs_service.init_connection(
@@ -125,7 +135,7 @@ class SambaVFSServer:
                 if not file_info.get("exists", False):
                     logger.warning(self, f"process_request(stat) : File not found: {request.get('path', '')}")
                     return {"success": False, "error": "File not found"}
-                logger.warning(self, f"process_request(stat) : File = {file_info}")
+                # logger.warning(self, f"process_request(stat) : File = {file_info}")
                 is_dir = file_info.get("is_directory", False)
                 mode = file_info.get("mode", (0o755 if is_dir else 0o644))
                 mtime = file_info.get("mtime", int(time.time()))
