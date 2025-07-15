@@ -18,6 +18,12 @@ class FileSystemService:
         self.active_connections = {}  # Store active connections
         self.next_handle_id = 1  # Incremental ID for file and directory handles, do not use 0 as it can be confused to NULL in C VFS cast.
 
+    def get_file_info_fd(self, fd: int, username: str) -> Dict[str, Any]:
+        finfo = self.file_handles.get(fd, None)
+        if finfo is None:
+            return {"exists": False}
+        return self.get_file_info(finfo["path"], username)
+
     def get_file_info(self, path: str, username: str) -> Dict[str, Any]:
         """Get information about a file or directory."""
         logger.info(self, f"Getting file info for {path} (user: {username})")

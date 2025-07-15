@@ -6,6 +6,7 @@
 // Set in smb.conf "log level = 3 vfs:10"
 #include "includes.h"
 #include "smbd/smbd.h"
+#include "auth.h"
 #include "system/filesys.h"
 #include "lib/util/tevent_unix.h"
 #include "lib/util/sys_rw.h"
@@ -15,8 +16,12 @@
 #include <sys/un.h>
 #include <errno.h>
 #include <dirent.h>
+#include <sys/eventfd.h>
 
 extern NTSTATUS smb_register_vfs(int version, const char *name, const struct vfs_fn_pointers *fns);
+extern int fsp_get_pathref_fd(const struct files_struct *fsp);
+extern int fsp_get_io_fd(const struct files_struct *fsp);
+
 
 #ifndef SMB_VFS_INTERFACE_VERSION
 #error "SMB_VFS_INTERFACE_VERSION not defined"
@@ -38,7 +43,7 @@ struct tracim_data {
 /* Helper function to get module data */
 static struct tracim_data *get_tracim_data(vfs_handle_struct *handle)
 {
-	DEBUG(0 ,("Tracim: get_tracim_data().\n"));
+	// DEBUG(0 ,("Tracim: get_tracim_data().\n"));
     struct tracim_data *data;
     
     SMB_VFS_HANDLE_GET_DATA(handle, data, struct tracim_data, return NULL);
@@ -56,12 +61,13 @@ static struct tracim_data *get_tracim_data(vfs_handle_struct *handle)
  */
 static int connect_to_service(struct tracim_data *data)
 {
-	DEBUG(0, ("Tracim: connect_to_service().\n"));
+	// DEBUG(0, ("Tracim: connect_to_service().\n"));
     struct sockaddr_un addr;
     int ret;
     
     if (data->connected && data->socket_fd >= 0) {
-        return 0; /* Already connected */
+		// DEBUG(0, ("Tracim: connect_to_service() : Already connected.\n"));
+        return 0;
     }
     
     if (data->socket_fd >= 0) {
@@ -207,8 +213,8 @@ static void tracim_disconnect(vfs_handle_struct *handle)
         close(data->socket_fd);
         data->socket_fd = -1;
         data->connected = false;
+    	talloc_free(data);
     }
-    
     // SMB_VFS_NEXT_DISCONNECT(handle);
 }
 
@@ -229,14 +235,21 @@ static int tracim_openat(vfs_handle_struct *handle,
                          const struct vfs_open_how *how)
 {
     struct tracim_data *data = get_tracim_data(handle);
-    DEBUG(0, ("Tracim: tracim_openat(%s).\n", data->user));
+    DEBUG(0, ("Tracim: tracim_openat(%s, %s, %i, %d).\n", smb_fname->base_name, smb_fname->stream_name, smb_fname->flags, fsp->fsp_flags.is_pathref));
     json_t *request, *response, *success_obj, *fd_obj;
-    int result = -1;
+    int fd = -1;
     if (!data) {
         DEBUG(0, ("tracim_openat: Failed to get VFS tracim data\n"));
-        return SMB_VFS_NEXT_OPENAT(handle, dirfsp, smb_fname, fsp, how);
+        return fd; // SMB_VFS_NEXT_OPENAT(handle, dirfsp, smb_fname, fsp, how);
     }
-
+	if (fsp->fsp_flags.is_directory) {
+        DEBUG(0, ("tracim_openat: is directory\n"));
+		// fd = eventfd(0, FD_CLOEXEC);
+	}
+	if (fsp->fsp_flags.is_pathref) {
+		DEBUG(0, ("tracim_openat: is pathref\n"));
+	}
+	
     request = json_object();
     json_object_set_new(request, "op", json_string("open"));
     json_object_set_new(request, "path", json_string(smb_fname->base_name));
@@ -247,15 +260,15 @@ static int tracim_openat(vfs_handle_struct *handle,
     json_decref(request);
     if (!response) {
         DEBUG(0, ("tracim_openat: Failed to get response for open, falling back to next VFS\n"));
-        return result; // SMB_VFS_NEXT_OPENAT(handle, dirfsp, smb_fname, fsp, how);
+        return fd; // SMB_VFS_NEXT_OPENAT(handle, dirfsp, smb_fname, fsp, how);
     }
 
     success_obj = json_object_get(response, "success");
     if (success_obj && json_is_true(success_obj)) {
         fd_obj = json_object_get(response, "handle");
         if (fd_obj && json_is_integer(fd_obj)) {
-            result = json_integer_value(fd_obj);
-            DEBUG(0, ("tracim_openat: Successfully opened %s, fd=%d\n", smb_fname->base_name, result));
+            fd = json_integer_value(fd_obj);
+            DEBUG(0, ("tracim_openat: Successfully opened %s, fd=%d\n", smb_fname->base_name, fd));
         } else {
             DEBUG(0, ("tracim_openat: No fd..."));
 		}
@@ -263,10 +276,11 @@ static int tracim_openat(vfs_handle_struct *handle,
         DEBUG(0, ("tracim_openat: Open failed for %s, falling back to next VFS\n", smb_fname->base_name));
     }
     json_decref(response);
-	// DEBUG(0, ("Tracim: tracim_openat() : file is : %s, %ld, %d, %ld.\n", smb_fname->base_name, smb_fname->st.st_ex_size, smb_fname->st.st_ex_mode, smb_fname->st.st_ex_mtime.tv_sec));
+	// fd = eventfd(0, FD_CLOEXEC);
+	DEBUG(0, ("Tracim: tracim_openat() : %s, %d.\n", smb_fname->base_name, fd));
 	// result = SMB_VFS_NEXT_OPENAT(handle, dirfsp, smb_fname, fsp, how);
 	// DEBUG(0, ("Tracim: tracim_openat() : file SMB_VFS_NEXT_OPENAT : %s, %ld, %d, %ld : %d.\n", smb_fname->base_name, smb_fname->st.st_ex_size, smb_fname->st.st_ex_mode, smb_fname->st.st_ex_mtime.tv_sec, result));
-    return result; // >= 0 ? result : 
+    return fd; // SMB_VFS_NEXT_OPENAT(handle, dirfsp, smb_fname, fsp, how); // >= 0 ? result : 
 }
 
 static int tracim_close(vfs_handle_struct *handle, files_struct *fsp)
@@ -274,31 +288,40 @@ static int tracim_close(vfs_handle_struct *handle, files_struct *fsp)
 	DEBUG(0, ("Tracim: tracim_close().\n"));
     struct tracim_data *data = get_tracim_data(handle);
     json_t *request, *response, *success_obj;
-    int result = -1;
-    
+    int result = 0;
     if (!data) {
-        return result; // SMB_VFS_NEXT_CLOSE(handle, fsp);
+        return -1; // SMB_VFS_NEXT_CLOSE(handle, fsp);
     }
-    
-    request = json_object();
-    json_object_set_new(request, "op", json_string("close"));
-    json_object_set_new(request, "handle", json_integer(fsp_get_io_fd(fsp)));
-    response = send_request(data, request);
-    json_decref(request);
-    if (response) {
-        success_obj = json_object_get(response, "success");
-        if (success_obj && json_is_true(success_obj)) {
-            result = 0;
-        } else {
-			result = -1;
-        	success_obj = json_object_get(response, "error");
-			DEBUG(10, ("Tracim: tracim_close() failed: %s\n", json_string_value(success_obj)));
+	int fd = 0;
+	if (fsp->fsp_flags.is_pathref) {
+		fd = fsp_get_pathref_fd(fsp);
+	} else {
+		fd = fsp_get_io_fd(fsp);
+	}
+	if (fd>0) {
+		request = json_object();
+		json_object_set_new(request, "op", json_string("close"));
+		json_object_set_new(request, "handle", json_integer(fd));
+		response = send_request(data, request);
+		json_decref(request);
+		if (response) {
+			success_obj = json_object_get(response, "success");
+			if (success_obj && json_is_true(success_obj)) {
+				result = 0;
+			} else {
+				result = -1;
+				success_obj = json_object_get(response, "error");
+				DEBUG(10, ("Tracim: tracim_close() failed: %s\n", json_string_value(success_obj)));
+			}
+			json_decref(response);
 		}
-        json_decref(response);
-    }
-	result = SMB_VFS_NEXT_CLOSE(handle, fsp);
-	DEBUG(0, ("Tracim: tracim_close() : %d.\n", result));
-    return result; // result; // >= 0 ? result : SMB_VFS_NEXT_CLOSE(handle, fsp);
+		// result = SMB_VFS_NEXT_CLOSE(handle, fsp);
+		fsp->vfs_extension = NULL;
+		DEBUG(0, ("Tracim: tracim_close() : %d.\n", result));
+	} else {
+		DEBUG(0, ("Tracim: close_fn called with invalid fd\n"));
+	}
+    return result; // SMB_VFS_NEXT_CLOSE(handle, fsp);
 }
 
 static ssize_t tracim_pread(vfs_handle_struct *handle, files_struct *fsp, 
@@ -343,7 +366,7 @@ static ssize_t tracim_pread(vfs_handle_struct *handle, files_struct *fsp,
     }
     
     json_decref(response);
-    return result >= 0 ? result : SMB_VFS_NEXT_PREAD(handle, fsp, data_buf, n, offset);
+    return result; // >= 0 ? result : SMB_VFS_NEXT_PREAD(handle, fsp, data_buf, n, offset);
 }
 
 static ssize_t tracim_pwrite(vfs_handle_struct *handle, files_struct *fsp,
@@ -398,7 +421,7 @@ static ssize_t tracim_pwrite(vfs_handle_struct *handle, files_struct *fsp,
     return result; // >= 0 ? result : SMB_VFS_NEXT_PWRITE(handle, fsp, data_buf, n, offset);
 }
 
-int tracim_stat_sub(json_t *request, vfs_handle_struct *handle, SMB_STRUCT_STAT *sbuf) {
+int tracim_stat_sub(json_t *request, vfs_handle_struct *handle, SMB_STRUCT_STAT *sbuf, files_struct *fsp) {
     json_t *response, *json_obj, *stat_obj;
     struct tracim_data *data = get_tracim_data(handle);
     int result = -1;
@@ -407,7 +430,7 @@ int tracim_stat_sub(json_t *request, vfs_handle_struct *handle, SMB_STRUCT_STAT 
     	json_decref(request);
         return result; // SMB_VFS_NEXT_STAT(handle, smb_fname);
     }
-	DEBUG(0, ("Tracim: tracim_stat_sub(%s).\n", data->user));
+	// DEBUG(0, ("Tracim: tracim_stat_sub(%s).\n", data->user));
     json_object_set_new(request, "op", json_string("stat"));
     json_object_set_new(request, "user", json_string(data->user));
     response = send_request(data, request);
@@ -435,6 +458,7 @@ int tracim_stat_sub(json_t *request, vfs_handle_struct *handle, SMB_STRUCT_STAT 
 			unsigned long int mode = json_integer_value(json_obj);
 			if (is_dir) {
 				mode |= S_IFDIR;
+				// fsp->fsp_flags.is_directory = 1;
 			} else {
 				mode |= S_IFREG;
 			}
@@ -447,6 +471,9 @@ int tracim_stat_sub(json_t *request, vfs_handle_struct *handle, SMB_STRUCT_STAT 
 			sbuf->st_ex_atime.tv_sec = mtime;
 			sbuf->st_ex_ctime.tv_sec = mtime;
 		}
+		sbuf->st_ex_nlink = 2;
+    	sbuf->st_ex_uid = handle->conn->session_info->unix_token->uid;
+    	sbuf->st_ex_gid = handle->conn->session_info->unix_token->gid;
 		DEBUG(0, ("Tracim: tracim_stat() : file is: %ld, %d, %ld.\n",
 			sbuf->st_ex_size, sbuf->st_ex_mode, sbuf->st_ex_mtime.tv_sec));
         result = 0;
@@ -461,7 +488,7 @@ int tracim_stat_sub(json_t *request, vfs_handle_struct *handle, SMB_STRUCT_STAT 
     // result = SMB_VFS_NEXT_STAT(handle, smb_fname);
 	// DEBUG(0, ("Tracim: tracim_stat() : file SMB_VFS_NEXT_STAT : %ld, %d, %ld.\n", sbuf->st_ex_size, sbuf->st_ex_mode, sbuf->st_ex_mtime.tv_sec));
 	DEBUG(0, ("Tracim: tracim_stat() : %d.\n", result));
-	return result;
+	return 0;
 }
 
 /**
@@ -473,11 +500,16 @@ int tracim_stat_sub(json_t *request, vfs_handle_struct *handle, SMB_STRUCT_STAT 
  * @return int 
  */
 static int tracim_fstat(vfs_handle_struct *handle, files_struct *fsp, SMB_STRUCT_STAT *sbuf) {
-	int fd = fsp_get_io_fd(fsp);
+	int fd = 0;
+	if (fsp->fsp_flags.is_pathref) {
+		fd = fsp_get_pathref_fd(fsp);
+	} else {
+		fd = fsp_get_io_fd(fsp);
+	}
     DEBUG(0, ("Tracim: tracim_fstat(%d)\n", fd));
     json_t *request = json_object();
-    json_object_set_new(request, "handle", json_integer(fd));
-	return tracim_stat_sub(request, handle, sbuf);
+    json_object_set_new(request, "fd", json_integer(fd));
+	return tracim_stat_sub(request, handle, sbuf, fsp);
 }
 /**
  * @brief Get metadata by pathname
@@ -488,12 +520,34 @@ static int tracim_fstat(vfs_handle_struct *handle, files_struct *fsp, SMB_STRUCT
  */
 static int tracim_stat(vfs_handle_struct *handle, struct smb_filename *smb_fname)
 {
-	DEBUG(0, ("Tracim: tracim_stat(%s).\n", smb_fname->base_name));
+    DEBUG(0, ("Tracim: tracim_stat(%s, %s, %i).\n",
+		smb_fname->base_name, smb_fname->stream_name, smb_fname->flags));
+	/* const char *mount_point = handle->conn->connectpath;
+	if (strcmp(smb_fname->base_name, mount_point)==0) {
+   		DEBUG(0, ("Tracim: tracim_stat() is mount point.\n"));
+		return SMB_VFS_NEXT_STAT(handle, smb_fname);
+	} */
     json_t *request;
     request = json_object();
     json_object_set_new(request, "path", json_string(smb_fname->base_name));
-	return tracim_stat_sub(request, handle, &smb_fname->st);
+	return tracim_stat_sub(request, handle, &smb_fname->st, smb_fname->fsp);
 }
+int tracim_lstat(struct vfs_handle_struct *handle, struct smb_filename *smb_fname)
+{
+	int ret;
+    DEBUG(0, ("Tracim: tracim_lstat(%s, %s, %i, %p).\n",
+		smb_fname->base_name, smb_fname->stream_name, smb_fname->flags, smb_fname->fsp));
+    json_t *request;
+
+	ret = SMB_VFS_NEXT_LSTAT(handle, smb_fname);
+	if (ret == -1 && errno == EACCES) {
+		DEBUG(10, ("Trying lstat with capability for %s\n", smb_fname->base_name));
+	}
+    request = json_object();
+    json_object_set_new(request, "path", json_string(smb_fname->base_name));
+	return tracim_stat_sub(request, handle, &smb_fname->st, smb_fname->fsp);
+}
+
 static int tracim_unlinkat(vfs_handle_struct *handle,
                            struct files_struct *dirfsp,
                            const struct smb_filename *smb_fname,
@@ -529,30 +583,9 @@ static int tracim_unlinkat(vfs_handle_struct *handle,
     }
     
     json_decref(response);
-    return result >= 0 ? result : SMB_VFS_NEXT_UNLINKAT(handle, dirfsp, smb_fname, flags);
+    return result; // >= 0 ? result : SMB_VFS_NEXT_UNLINKAT(handle, dirfsp, smb_fname, flags);
 }
 
-/* Structure to hold our custom DIR state */
-struct tracim_dir {
-    DIR *real_dir;
-    int static_index;
-};
-
-/* Helper function to create a custom DIR wrapper */
-static DIR *create_static_dir(void) {
-    struct tracim_dir *custom_dir;
-
-    custom_dir = talloc_zero(NULL, struct tracim_dir);
-    if (!custom_dir) {
-        errno = ENOMEM;
-        return NULL;
-    }
-    
-    custom_dir->real_dir = NULL;
-    custom_dir->static_index = 0;
-
-    return (DIR *)custom_dir;
-}
 /**
  * @brief Call API to open a directory in the Tracim VFS. There is no file list.
  * 
@@ -690,8 +723,42 @@ int tracim_fstatat(
 		struct vfs_handle_struct *handle, const struct files_struct *dirfsp,
 		const struct smb_filename *smb_fname, SMB_STRUCT_STAT *sbuf, int flags) {
     DEBUG(0, ("Tracim: tracim_fstatat()\n"));
-
+	return 0;
 }
+ssize_t tracim_fgetxattr(struct vfs_handle_struct *handle, struct files_struct *fsp,
+	const char *name, void *value, size_t size)
+{
+    DEBUG(0, ("Tracim: tracim_fgetxattr()\n"));
+	return 0;
+}
+ssize_t tracim_flistxattr(struct vfs_handle_struct *handle, struct files_struct *fsp,
+	char *list, size_t size)
+{
+    DEBUG(0, ("Tracim: tracim_flistxattr()\n"));
+	return 0;
+}
+static off_t tracim_lseek(vfs_handle_struct *handle, files_struct *fsp, off_t offset, int whence)
+{
+    struct file_context *ctx = (struct file_context *)fsp->vfs_extension;
+    off_t result;
+    DEBUG(0, ("Tracim: tracim_lseek()\n"));
+
+    /* if (!ctx || ctx->is_directory) {
+        errno = EISDIR;
+        return -1;
+    }
+    
+    if (ctx->temp_path) {
+        // Use standard lseek on temporary file
+        result = lseek(fsp->fh->fd, offset, whence);
+    } else {
+        // Handle seeking for memory-based files
+        result = handle_memory_lseek(ctx->db_path, fsp, offset, whence);
+    } */
+
+    return result;
+}
+
 
 /* VFS operations structure for Samba 4.x : Not ok before */
 static struct vfs_fn_pointers tracim_functions = {
@@ -700,13 +767,19 @@ static struct vfs_fn_pointers tracim_functions = {
     .openat_fn = tracim_openat,
     .close_fn = tracim_close,
     .pread_fn = tracim_pread,
+	.lseek_fn = tracim_lseek,
 
-	// .fstat_fn = tracim_fstat,
-	// .fstatat_fn = tracim_fstatat,
-
-    // .pwrite_fn = tracim_pwrite,
-    .unlinkat_fn = tracim_unlinkat,
 	.stat_fn = tracim_stat,
+	.fstat_fn = tracim_fstat,
+	.fstatat_fn = tracim_fstatat,
+	.lstat_fn = tracim_lstat,
+
+	.fgetxattr_fn = tracim_fgetxattr,
+	.flistxattr_fn = tracim_flistxattr,
+ 
+    .pwrite_fn = tracim_pwrite,
+    .unlinkat_fn = tracim_unlinkat,
+
     .fdopendir_fn = tracim_opendir,
     .readdir_fn = tracim_readdir,
     .closedir_fn = tracim_closedir

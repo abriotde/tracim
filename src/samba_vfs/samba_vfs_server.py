@@ -114,10 +114,13 @@ class SambaVFSServer:
             elif op == "disconnect":
                 return self._fs_service.disconnect()
             elif op == "stat":
-                file_info = self._fs_service.get_file_info(
-                    request.get("path", ""),
-                    request.get("user", "")
-                )
+                path = request.get("path", "")
+                user = request.get("user", "")
+                if path!="":
+                    file_info = self._fs_service.get_file_info(path, user)
+                else:
+                    fd = request.get("fd", -1)
+                    file_info = self._fs_service.get_file_info_fd(fd, user)
                 
                 if not file_info.get("exists", False):
                     logger.warning(self, f"process_request(stat) : File not found: {request.get('path', '')}")
