@@ -34,7 +34,7 @@ class SambaVFSDaemon(FakeDaemon):
 
     def run(self) -> None:
         self._service = SambaVFSServer(
-            service=FileSystemService(),
-            socket="/srv/samba_vfs_tracim_service.sock" # TODO self.config.SAMBA__VFS__SOCKET,
+            service=FileSystemService(self.config),
+            socket="/srv/samba_vfs_tracim_service.sock" # TODO self.config.SAMBA__VFS__SOCKET
         )
         self._service.run()

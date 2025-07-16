@@ -22,6 +22,8 @@ class SambaVFSServer:
     SOCKET_ENCODING = "ascii"
 
     def __init__(self, service, socket:str=None):
+        """
+        """
         self._socket_path = socket
         self._fs_service = service
         self.running = False

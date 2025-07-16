@@ -5,15 +5,17 @@ Run:
  
 	$ sudo ./install.sh
 
-On fail : 
+## Common fail causes
 
-In samba/bin/default/docs-xml/smbdotconf/parameters.all.xml
+### Compile
 
-- Remove 1 of double definition of "neutralize_nt4_emulation".
+Usually compile fail because "./configure" was not running in the good source files (After "git checkout" for exemple). So try run
 
-- Remove all "Himmelblaud" definitions.
-
-And relaunch script.
+	$ cd samba
+	$ make clean
+	$ ./configure
+	$ cd ..
+	$ sudo ./install.sh
 
 # Documentation
 
@@ -29,8 +31,8 @@ WebDav
 
 https://demo.tracim.fr/api/doc/
 
+../ref/tracim/backend/tracim_backend/lib/webdav/resources.py
 
-./backend/tracim_backend/lib/webdav/resources.py
 
 https://github.com/tracim/tracim/blob/develop/backend/tracim_backend/lib/core/content.py
 - create() (créé un contenu vide)

@@ -619,6 +619,7 @@ static DIR *tracim_opendir(vfs_handle_struct *handle,
     json_object_set_new(request, "op", json_string("opendir"));
     json_object_set_new(request, "path", json_string(fsp->fsp_name->base_name));
     json_object_set_new(request, "attr", json_integer(attr));
+    json_object_set_new(request, "user", json_string(data->user));
 
     response = send_request(data, request);
     json_decref(request);

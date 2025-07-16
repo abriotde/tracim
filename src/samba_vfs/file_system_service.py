@@ -2,27 +2,144 @@
 import os
 from typing import Dict, Any, Optional
 import time
-import logging
+import typing
+from dataclasses import dataclass, field
+from pluggy import PluginManager
+from tracim_backend.config import CFG
+from tracim_backend.models.tracim_session import TracimSession
+from tracim_backend.models.auth import User
+from tracim_backend.models.data import Content
+from tracim_backend.models.data import Workspace
 from tracim_backend.lib.utils.logger import logger
+from tracim_backend.lib.webdav.resources import WorkspaceAndContentContainer
+from tracim_backend.lib.utils.request import TracimContext
+from tracim_backend.lib.core.user import UserApi
+from tracim_backend.exceptions import NotAuthenticated
+
+@dataclass
+class SambaVFSSession:
+    service:str
+    user:str
+    connected_at:float
+    workspace:WorkspaceAndContentContainer
+
+@dataclass
+class SambaVFSFileHandler:
+	path:str
+	username:str
+	flags:int = 0
+	mode:int = 0
+	position:int = 0
+	content:str = b"" # Case file: binary content
+	mask:int = 0
+	entries:list[str] = field(default_factory=lambda: []) # Case dir: list of files
+
+class SambaVFSTracimContext(TracimContext):
+    def __init__(
+        self,
+        app_config,
+        user:str,
+        plugin_manager:PluginManager=None
+    ):
+        super().__init__()
+        self._candidate_parent_content = None
+        self._app_config = app_config
+        self._session = None
+        self._plugin_manager = plugin_manager
+        self._username = user
+        self.processed_path = None
+        self.processed_destpath = None
+
+    @property
+    def dbsession(self) -> TracimSession:
+        assert self._session
+        return self._session
+
+    @dbsession.setter
+    def dbsession(self, session: TracimSession) -> None:
+        self._session = session
+
+    @property
+    def app_config(self) -> CFG:
+        return self._app_config
+
+    @property
+    def plugin_manager(self) -> PluginManager:
+        return self._plugin_manager
+
+    @property
+    def current_user(self) -> User:
+        """
+        Current authenticated user if exist
+        """
+        if not self._current_user:
+            uapi = UserApi(None, show_deleted=True, session=self.dbsession, config=self.app_config)
+            user = uapi.get_one_by_login(self._username)
+            self.set_user(user)
+        return self._current_user
+
+    def _get_current_webdav_username(self) -> str:
+        if not self.environ.get("wsgidav.auth.user_name"):
+            raise NotAuthenticated("User not found")
+        return self.environ["wsgidav.auth.user_name"]
+
+    @property
+    def current_workspace(self) -> typing.Optional[Workspace]:
+        """
+        Workspace of current ressources used if exist, for example,
+        if you are editing content 21 in workspace 3,
+        current_workspace will be 3.
+        """
+        return self.processed_path.current_workspace
+
+    @property
+    def current_content(self) -> typing.Optional[Content]:
+        """
+        Current content if exist, if you are editing content 21, current content
+        will be content 21.
+        """
+        return self.processed_path.current_content
+
+    def set_destpath(self, destpath: str) -> None:
+        self.processed_destpath = ProcessedWebdavPath(
+            path=destpath,
+            current_user=self.current_user,
+            session=self.dbsession,
+            app_config=self.app_config,
+        )
+
+    @property
+    def candidate_parent_content(self) -> typing.Optional[Content]:
+        return self.processed_destpath.current_parent_content
+
+    @property
+    def candidate_workspace(self) -> typing.Optional[Workspace]:
+        return self.processed_destpath.current_workspace
+
 
 class FileSystemService:
     """Interface to the actual database operations."""
     
-    def __init__(self):
+    def __init__(self, config):
+        """
+        config: TracimConfig
+        """
         # Initialize your database connection here
         # self.db = db_lib.connect()
         self.db = None  # Placeholder - replace with your actual DB connection
         logger.info(self, "Database service initialized")
-        self.file_handles = {}  # Store open file handles
-        self.dir_handles = {}  # Store open directory handles
-        self.active_connections = {}  # Store active connections
+        self.file_handles:Dict[int, SambaVFSFileHandler] = {}  # Store open file handles
+        self.dir_handles:Dict[int, SambaVFSFileHandler] = {}  # Store open directory handles
+        self.active_connections:Dict[int, SambaVFSSession] = {}  # Store active connections
+        self.active_users:Dict[str, int] = {} # Index connection's id by username.
         self.next_handle_id = 1  # Incremental ID for file and directory handles, do not use 0 as it can be confused to NULL in C VFS cast.
+        self.config = config
 
     def get_file_info_fd(self, fd: int, username: str) -> Dict[str, Any]:
         finfo = self.file_handles.get(fd, None)
         if finfo is None:
             return {"exists": False}
-        return self.get_file_info(finfo["path"], username)
+        return self.get_file_info(finfo.path, username)
 
     def get_file_info(self, path: str, username: str) -> Dict[str, Any]:
         """Get information about a file or directory."""
@@ -30,7 +147,7 @@ class FileSystemService:
         file_infos = {
             "exists": False
         }
-        if path in ["/", ".", "/var/lib/samba/tracim"]:
+        if path in ["/",".", "/var/lib/samba/tracim"]:
             file_infos = {
                 "exists": True,
                 "is_directory": True,
@@ -39,7 +156,7 @@ class FileSystemService:
                 "can_read": True,
                 "can_write": True
             }
-        elif path == f"/user_{username}":
+        elif path == f"user_{username}":
             file_infos = {
                 "exists": True,
                 "is_directory": True,
@@ -48,7 +165,7 @@ class FileSystemService:
                 "can_read": True,
                 "can_write": True
             }
-        elif path == f"/user_{username}/test.txt":
+        elif path == f"user_{username}/test.txt":
             file_infos = {
                 "exists": True,
                 "is_directory": False,
@@ -83,15 +200,14 @@ class FileSystemService:
         handle_id = self.next_handle_id
         self.next_handle_id += 1
         
-        self.file_handles[handle_id] = {
-            "path": path,
-            "username": username,
-            "flags": flags,
-            "mode": mode,
-            "position": 0,
-            "content": file_info.get("content", "")
-        }
-        
+        self.file_handles[handle_id] = SambaVFSFileHandler(
+            path= path,
+            username= username,
+            flags= flags,
+            mode= mode,
+            position= 0,
+            content= file_info.get("content", "")
+		)
         return {
             "success": True,
             "handle": handle_id
@@ -105,15 +221,15 @@ class FileSystemService:
             return {"success": False, "error": "Invalid file handle"}
         
         file_info = self.file_handles[handle]
-        content = file_info["content"]
-        position = file_info["position"]
+        content = file_info.content
+        position = file_info.position
         
         # Read from current position
         data = content[position:position + size]
-        file_info["position"] += len(data)
+        file_info.position += len(data)
         
         # This is where you'd call your actual database library
-        # return self.db.read_file(handle, size)
+        # TODO
         
         return {
             "success": True,
@@ -139,17 +255,17 @@ class FileSystemService:
         # return self.db.write_file(handle, data, size)
         
         # Placeholder implementation
-        position = file_info["position"]
-        content = file_info["content"]
+        position = file_info.position
+        content = file_info.content
         
         # If position is at the end, append
         if position >= len(content):
-            file_info["content"] = content + data[:size]
+            file_info.content = content + data[:size]
         else:
             # Otherwise, overwrite/insert
-            file_info["content"] = content[:position] + data[:size] + content[position + size:]
+            file_info.content = content[:position] + data[:size] + content[position + size:]
         
-        file_info["position"] += size
+        file_info.position += size
         
         return {
             "success": True,
@@ -159,20 +275,11 @@ class FileSystemService:
     def close_file(self, handle: int) -> Dict[str, Any]:
         """Close a file handle."""
         logger.info(self, f"Closing file {handle}")
-        
         if handle not in self.file_handles:
             return {"success": False, "error": "Invalid file handle"}
-        
-        # This is where you'd call your actual database library
-        # return self.db.close_file(handle)
-        
-        # Clean up handle
         file_info = self.file_handles.pop(handle)
-        
-        # In a real implementation, you'd commit changes to the database here
-        logger.info(self, f"Closed file {file_info['path']}")
-        
-        return {"success":True, "fd":handle, "path":"PATH"}
+        logger.info(self, f"Closed file {file_info.path}")
+        return {"success":True, "fd":handle, "path":file_info.path}
     
     def open_directory(self, path: str, username: str, mask: str) -> Dict[str, Any]:
         """Open a directory for reading."""
@@ -189,9 +296,6 @@ class FileSystemService:
         if not dir_info.get("can_read", False):
             return {"success": False, "error": "Permission denied"}
         
-        # This is where you'd call your actual database library
-        # return self.db.open_directory(path, username, mask)
-        
         # Placeholder - set up directory contents for readdir
         handle_id = self.next_handle_id
         self.next_handle_id += 1
@@ -205,13 +309,13 @@ class FileSystemService:
             # User's home directory - show some files
             entries = ["test.txt", "docs"]
         
-        self.dir_handles[handle_id] = {
-            "path": path,
-            "username": username,
-            "mask": mask,
-            "entries": entries,
-            "position": 0
-        }
+        self.dir_handles[handle_id] = SambaVFSFileHandler(
+            path= path,
+            username= username,
+            mask= mask,
+            entries= entries,
+            position= 0
+		)
         
         return {
             "success": True,
@@ -225,8 +329,8 @@ class FileSystemService:
         if handle not in self.dir_handles:
             return {"success": False, "error": "Invalid directory handle"}
         dir_info = self.dir_handles[handle]
-        entries = dir_info["entries"]
-        position = dir_info["position"]
+        entries = dir_info.entries
+        position = dir_info.position
         logger.info(self, f"read_directory(fd={handle}) : entries={entries}, position={position}")
         if position >= len(entries):
             return {"success": False, "error": "No more entries"}
@@ -239,8 +343,8 @@ class FileSystemService:
         # return self.db.read_directory(handle)
         
         # Determine entry type
-        entry_path = os.path.join(dir_info["path"], entry_name) 
-        entry_info = self.get_file_info(entry_path, dir_info["username"])
+        entry_path = os.path.join(dir_info.path, entry_name)
+        entry_info = self.get_file_info(entry_path, dir_info.username)
         entry_type = 4 if entry_info.get("is_directory", False) else 8  # DT_DIR = 4, DT_REG = 8
         
         return {
@@ -272,22 +376,39 @@ class FileSystemService:
         # Placeholder
         conn_id = self.next_handle_id
         self.next_handle_id += 1
-        
-        self.active_connections[conn_id] = {
-            "service": service,
-            "username": user,
-            "connected_at": time.time()
-        }
+        context = SambaVFSTracimContext(self.config)
+        workspace_container = WorkspaceAndContentContainer(
+            path="/",
+            environ={},
+            label="",
+            workspace=None,
+            tracim_context=context,
+            provider=self.provider,
+            list_orphan_workspaces=True,
+        )
+        session = SambaVFSSession(service, user, time.time(), workspace_container)
+        self.active_connections[conn_id] = session
+        self.active_users[user] = conn_id
         return {"success": True, "connection_id": conn_id}
-    
+
+    def _get_workspace(self, username:str):
+        """
+        """
+        conn_id = self.active_users.get(username)
+        if conn_id is None:
+            return None
+        connection = self.active_connections.get(conn_id)
+        if connection is None:
+            return None
+        return connection["workspace"]
+
     def disconnect(self, conn_id: Optional[int] = None) -> Dict[str, Any]:
         """Close a connection."""
         logger.info(self, f"Disconnecting connection {conn_id}")
 
-        if conn_id is not None and conn_id in self.active_connections:
+        infos = self.active_connections.get(conn_id, None)
+        if infos is not None:
             self.active_connections.pop(conn_id)
-
-        # This is where you'd call your actual database library to clean up
-        # return self.db.disconnect(conn_id)
+            self.active_users.pop(infos["user"])
         
         return {"success": True}
