@@ -89,24 +89,26 @@ class SambaVFSServer:
                     break
 
                 # Parse request
+                requests = []
                 try:
                     d = data.decode(encoding=self.SOCKET_ENCODING).strip()
                     if d == "":
                         logger.warning(self, f"Received empty data from client {client_id}")
                     else:
-                        request = json.loads(d)
+                        requests = d.split('\n')
                 except json.JSONDecodeError as e:
                     logger.error(self, f"Invalid JSON: '{d}' : error {e}")
                     response = {"success": False, "error": "Invalid JSON request"}
                     conn.sendall((json.dumps(response)+"\n").encode(encoding=self.SOCKET_ENCODING))
                     continue
-                response = self.process_request(request)
-                
-                # Send response
-                resp = (json.dumps(response)+"\n").encode(encoding=self.SOCKET_ENCODING)
-                logger.warning(self, f"send response {resp}")
-                assert(len(resp)<self.MAX_RESPONSE_SIZE)
-                conn.sendall(resp)
+                for request in requests:
+                    if len(request)>1:
+                        response = self.process_request(json.loads(request))
+					    # Send response
+                        resp = (json.dumps(response)+"\n").encode(encoding=self.SOCKET_ENCODING)
+                        logger.warning(self, f"send response {resp}")
+                        assert(len(resp)<self.MAX_RESPONSE_SIZE)
+                        conn.sendall(resp)
         except Exception as e:
             logger.error(self, f"Error handling client {client_id}: {e}")
         finally:

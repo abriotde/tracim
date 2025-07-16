@@ -127,7 +127,7 @@ class FileSystemService:
         # Initialize your database connection here
         # self.db = db_lib.connect()
         self.db = None  # Placeholder - replace with your actual DB connection
-        logger.info(self, "Database service initialized")
+        logger.info(self, "Tracim file service initialized")
         self.file_handles:Dict[int, SambaVFSFileHandler] = {}  # Store open file handles
         self.dir_handles:Dict[int, SambaVFSFileHandler] = {}  # Store open directory handles
         self.active_connections:Dict[int, SambaVFSSession] = {}  # Store active connections
@@ -144,6 +144,7 @@ class FileSystemService:
     def get_file_info(self, path: str, username: str) -> Dict[str, Any]:
         """Get information about a file or directory."""
         logger.info(self, f"Getting file info for {path} (user: {username})")
+        logger.info(self, f"Opened files are {self.file_handles}")
         file_infos = {
             "exists": False
         }
@@ -180,6 +181,7 @@ class FileSystemService:
     def open_file(self, path: str, username: str, flags: int, mode: int) -> Dict[str, Any]:
         """Open a file and return a handle to it."""
         logger.info(self, f"Opening file {path} (user: {username}, flags: {flags})")
+        logger.info(self, f"Opened files are {self.file_handles}")
         
         # Check if file exists and user has permissions
         file_info = self.get_file_info(path, username)
@@ -274,11 +276,10 @@ class FileSystemService:
     
     def close_file(self, handle: int) -> Dict[str, Any]:
         """Close a file handle."""
-        logger.info(self, f"Closing file {handle}")
         if handle not in self.file_handles:
             return {"success": False, "error": "Invalid file handle"}
         file_info = self.file_handles.pop(handle)
-        logger.info(self, f"Closed file {file_info.path}")
+        logger.info(self, f"Closed file {handle} : {file_info.path}")
         return {"success":True, "fd":handle, "path":file_info.path}
     
     def open_directory(self, path: str, username: str, mask: str) -> Dict[str, Any]:
@@ -305,7 +306,7 @@ class FileSystemService:
         if path in ["/", "."]:
             # Root directory - show user-specific directory for this user
             entries = [f"user_{username}"]
-        elif path == f"/user_{username}":
+        elif path == f"user_{username}":
             # User's home directory - show some files
             entries = ["test.txt", "docs"]
         
@@ -337,10 +338,7 @@ class FileSystemService:
         
         # Get next entry
         entry_name = entries[position]
-        dir_info["position"] += 1
-        
-        # This is where you'd call your actual database library
-        # return self.db.read_directory(handle)
+        dir_info.position = position+1
         
         # Determine entry type
         entry_path = os.path.join(dir_info.path, entry_name)
@@ -363,7 +361,7 @@ class FileSystemService:
         
 		# Clean up handle
         dir_info = self.dir_handles.pop(handle)
-        logger.info(self, f"Closed directory {dir_info['path']}")
+        logger.info(self, f"Closed directory {dir_info.path}")
         return {"success":True, "handle":handle}
 
     def init_connection(self, service: str, user: str) -> Dict[str, Any]:
