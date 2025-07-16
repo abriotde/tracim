@@ -245,7 +245,11 @@ static int tracim_openat(vfs_handle_struct *handle,
                          const struct vfs_open_how *how)
 {
     struct tracim_data *data = get_tracim_data(handle);
-    DEBUG(0, ("Tracim: tracim_openat(%s, %s, %i, %d).\n", smb_fname->base_name, smb_fname->stream_name, smb_fname->flags, fsp->fsp_flags.is_pathref));
+	char * path = smb_fname->base_name;
+	if (fsp && fsp->fsp_name && fsp->fsp_name->base_name && strlen(fsp->fsp_name->base_name)>1) {
+		path = fsp->fsp_name->base_name;
+	}
+    DEBUG(0, ("Tracim: tracim_openat(%s, %s, %i, %d).\n", path, smb_fname->stream_name, smb_fname->flags, fsp->fsp_flags.is_pathref));
     json_t *request, *response, *success_obj, *fd_obj;
     int fd = -1;
     if (!data) {
@@ -262,7 +266,7 @@ static int tracim_openat(vfs_handle_struct *handle,
 	
     request = json_object();
     json_object_set_new(request, "op", json_string("open"));
-    json_object_set_new(request, "path", json_string(smb_fname->base_name));
+    json_object_set_new(request, "path", json_string(path));
     json_object_set_new(request, "flags", json_integer(how->flags));
     json_object_set_new(request, "mode", json_integer(how->mode));
     json_object_set_new(request, "user", json_string(data->user));
@@ -278,16 +282,16 @@ static int tracim_openat(vfs_handle_struct *handle,
         fd_obj = json_object_get(response, "handle");
         if (fd_obj && json_is_integer(fd_obj)) {
             fd = json_integer_value(fd_obj);
-            DEBUG(0, ("tracim_openat: Successfully opened %s, fd=%d\n", smb_fname->base_name, fd));
+            DEBUG(0, ("tracim_openat: Successfully opened %s, fd=%d\n", path, fd));
         } else {
             DEBUG(0, ("tracim_openat: No fd..."));
 		}
     } else {
-        DEBUG(0, ("tracim_openat: Open failed for %s, falling back to next VFS\n", smb_fname->base_name));
+        DEBUG(0, ("tracim_openat: Open failed for %s, falling back to next VFS\n", path));
     }
     json_decref(response);
 	// fd = eventfd(0, FD_CLOEXEC);
-	DEBUG(0, ("Tracim: tracim_openat() : %s, %d.\n", smb_fname->base_name, fd));
+	DEBUG(0, ("Tracim: tracim_openat() : %s, %d.\n", path, fd));
 	// result = SMB_VFS_NEXT_OPENAT(handle, dirfsp, smb_fname, fsp, how);
 	// DEBUG(0, ("Tracim: tracim_openat() : file SMB_VFS_NEXT_OPENAT : %s, %ld, %d, %ld : %d.\n", smb_fname->base_name, smb_fname->st.st_ex_size, smb_fname->st.st_ex_mode, smb_fname->st.st_ex_mtime.tv_sec, result));
     return fd; // SMB_VFS_NEXT_OPENAT(handle, dirfsp, smb_fname, fsp, how); // >= 0 ? result : 
@@ -539,7 +543,11 @@ static int tracim_stat(vfs_handle_struct *handle, struct smb_filename *smb_fname
 	} */
     json_t *request;
     request = json_object();
-    json_object_set_new(request, "path", json_string(smb_fname->base_name));
+	char * path = smb_fname->base_name;
+	if (smb_fname->fsp && smb_fname->fsp->fsp_name && smb_fname->fsp->fsp_name->base_name && strlen(smb_fname->fsp->fsp_name->base_name)>1) {
+		path = smb_fname->fsp->fsp_name->base_name;
+	}
+    json_object_set_new(request, "path", json_string(path));
 	return tracim_stat_sub(request, handle, &smb_fname->st, smb_fname->fsp);
 }
 int tracim_lstat(struct vfs_handle_struct *handle, struct smb_filename *smb_fname)
@@ -554,7 +562,11 @@ int tracim_lstat(struct vfs_handle_struct *handle, struct smb_filename *smb_fnam
 		DEBUG(10, ("Trying lstat with capability for %s\n", smb_fname->base_name));
 	}
     request = json_object();
-    json_object_set_new(request, "path", json_string(smb_fname->base_name));
+	char * path = smb_fname->base_name;
+	if (smb_fname->fsp && smb_fname->fsp->fsp_name && smb_fname->fsp->fsp_name->base_name && strlen(smb_fname->fsp->fsp_name->base_name)>1) {
+		path = smb_fname->fsp->fsp_name->base_name;
+	}
+    json_object_set_new(request, "path", json_string(path));
 	return tracim_stat_sub(request, handle, &smb_fname->st, smb_fname->fsp);
 }
 
@@ -571,11 +583,14 @@ static int tracim_unlinkat(vfs_handle_struct *handle,
     if (!data) {
         return SMB_VFS_NEXT_UNLINKAT(handle, dirfsp, smb_fname, flags);
     }
-    
+	char * path = smb_fname->base_name;
+	if (smb_fname->fsp && smb_fname->fsp->fsp_name && smb_fname->fsp->fsp_name->base_name && strlen(smb_fname->fsp->fsp_name->base_name)>1) {
+		path = smb_fname->fsp->fsp_name->base_name;
+	}
     /* Create JSON request */
     request = json_object();
     json_object_set_new(request, "op", json_string("unlink"));
-    json_object_set_new(request, "path", json_string(smb_fname->base_name));
+    json_object_set_new(request, "path", json_string(path));
     json_object_set_new(request, "flags", json_integer(flags));
     
     /* Send request */
@@ -610,7 +625,7 @@ static DIR *tracim_opendir(vfs_handle_struct *handle,
                                     const char *mask,
                                     uint32_t attr)
 {
-	DEBUG(0, ("Tracim: tracim_opendir(%s).\n", fsp->fsp_name->base_name));
+	DEBUG(0, ("Tracim: tracim_opendir(%s from %s).\n", fsp->fsp_name->base_name, fsp->fsp_name->stream_name));
     DIR *result = NULL;
     json_t *request, *response, *success_obj, *json_obj;
     struct tracim_data *data = get_tracim_data(handle);

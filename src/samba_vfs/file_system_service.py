@@ -6,15 +6,16 @@ import typing
 from dataclasses import dataclass, field
 from pluggy import PluginManager
 from tracim_backend.config import CFG
+from tracim_backend.exceptions import NotAuthenticated
 from tracim_backend.models.tracim_session import TracimSession
 from tracim_backend.models.auth import User
 from tracim_backend.models.data import Content
 from tracim_backend.models.data import Workspace
-from tracim_backend.lib.utils.logger import logger
-from tracim_backend.lib.webdav.resources import WorkspaceAndContentContainer
-from tracim_backend.lib.utils.request import TracimContext
 from tracim_backend.lib.core.user import UserApi
-from tracim_backend.exceptions import NotAuthenticated
+from tracim_backend.lib.utils.logger import logger
+from tracim_backend.lib.utils.request import TracimContext
+from tracim_backend.lib.webdav.resources import WorkspaceAndContentContainer
+from tracim_backend.lib.webdav.dav_provider import ProcessedWebdavPath
 
 @dataclass
 class SambaVFSSession:
@@ -144,11 +145,11 @@ class FileSystemService:
     def get_file_info(self, path: str, username: str) -> Dict[str, Any]:
         """Get information about a file or directory."""
         logger.info(self, f"Getting file info for {path} (user: {username})")
-        logger.info(self, f"Opened files are {self.file_handles}")
+        # logger.info(self, f"Opened files are {self.file_handles}")
         file_infos = {
             "exists": False
         }
-        if path in ["/",".", "/var/lib/samba/tracim"]:
+        if path in ["/",".","..","/var/lib/samba/tracim"]:
             file_infos = {
                 "exists": True,
                 "is_directory": True,
@@ -181,7 +182,7 @@ class FileSystemService:
     def open_file(self, path: str, username: str, flags: int, mode: int) -> Dict[str, Any]:
         """Open a file and return a handle to it."""
         logger.info(self, f"Opening file {path} (user: {username}, flags: {flags})")
-        logger.info(self, f"Opened files are {self.file_handles}")
+        # logger.info(self, f"Opened files are {self.file_handles}")
         
         # Check if file exists and user has permissions
         file_info = self.get_file_info(path, username)
@@ -301,6 +302,9 @@ class FileSystemService:
         handle_id = self.next_handle_id
         self.next_handle_id += 1
         
+        # workspace = self._get_workspace(username)
+        # files = workspace.get_member_list()
+        # logger.info(self, f"workspace files : {files}")
         # Simulate directory entries based on path
         entries = []
         if path in ["/", "."]:
@@ -374,7 +378,7 @@ class FileSystemService:
         # Placeholder
         conn_id = self.next_handle_id
         self.next_handle_id += 1
-        context = SambaVFSTracimContext(self.config)
+        context = SambaVFSTracimContext(self.config, "TheAdmin") # TODO User is set in hardcoded to 'TheAdmin' should be 'user'
         workspace_container = WorkspaceAndContentContainer(
             path="/",
             environ={},
@@ -398,7 +402,7 @@ class FileSystemService:
         connection = self.active_connections.get(conn_id)
         if connection is None:
             return None
-        return connection["workspace"]
+        return connection.workspace
 
     def disconnect(self, conn_id: Optional[int] = None) -> Dict[str, Any]:
         """Close a connection."""
