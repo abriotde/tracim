@@ -124,9 +124,8 @@ static json_t *send_request(struct tracim_data *data, json_t *request)
     }
     bytes_received = recv(data->socket_fd, response_buf, sizeof(response_buf) - 1, MSG_DONTWAIT);
 	if (bytes_received>0) {
-        DEBUG(0, ("tracim: Empty the buffer of '%s'\n", response_buf));
+        DEBUG(0, ("tracim: ERROR : Empty the buffer of '%s'\n", response_buf));
 	}
-    
     /* Send request */
 	int len = strlen(request_str);
 	if (len>=MAX_REQUEST_SIZE) { // assert()
@@ -679,11 +678,12 @@ static struct dirent *tracim_readdir(vfs_handle_struct *handle,
 		return SMB_VFS_NEXT_READDIR(handle, dirfsp, dirp);
 	}
     success_obj = json_object_get(response, "success");
-	if (!success_obj) {
+	if (success_obj) {
 		if (json_is_true(success_obj)) {
 			result = talloc(talloc_tos(), struct dirent);
 			if (!result) {
 				errno = ENOMEM;
+				DEBUG(0, ("Tracim: tracim_readdir ERROR: ENOMEM\n"));
 				return NULL;
 			}
 			entry_obj = json_object_get(response, "name");
@@ -693,31 +693,65 @@ static struct dirent *tracim_readdir(vfs_handle_struct *handle,
 			result->d_ino = json_integer_value(entry_obj);
 			entry_obj = json_object_get(response, "type");
 			result->d_type = (unsigned char)json_integer_value(entry_obj);
+			DEBUG(0, ("tracim_readdir: '%s'\n", result->d_name));
 		} else {
 			entry_obj = json_object_get(response, "error");
-			DEBUG(10, ("Tracim: tracim_readdir failed: %s\n", json_string_value(entry_obj)));
+			char * v = json_string_value(entry_obj);
+			if (strcmp("No more entries", v)!=0) {
+				DEBUG(0, ("Tracim: tracim_readdir ERROR: %s\n", v));
+			} else {
+				DEBUG(0, ("Tracim: tracim_readdir: %s\n", v));
+			}
 		}
 	} else {
-		DEBUG(10, ("Tracim: tracim_readdir failed\n"));
+		DEBUG(0, ("Tracim: tracim_readdir failed\n"));
 	}
     json_decref(response);
-
-	DEBUG(10, ("tracim_readdir: '%s'\n", result->d_name));
-
 	// result = SMB_VFS_NEXT_READDIR(handle, dirp, sbuf);
-
     return result;
 }
-
-/* Custom closedir function to clean up our custom structure */
-static int tracim_closedir(vfs_handle_struct *handle,
-                                DIR *dirp)
+/**
+ * @brief Custom closedir function to clean up our custom structure
+ * 
+ * @param handle 
+ * @param dirp 
+ * @return int 
+ */
+static int tracim_closedir(vfs_handle_struct *handle, DIR *dirp)
 {
     struct vfs_example_dir *custom_dir = (struct vfs_example_dir *)dirp;
-    int result = 0;
+    int result = -1;
+	json_t *request, *response, *success_obj, *entry_obj;
+	int fd = (int)dirp;
+    DEBUG(0, ("Tracim: tracim_closedir(%d)\n", fd));
+    struct tracim_data *data = get_tracim_data(handle);
+    if (!data) {
+        DEBUG(0, ("tracim_closedir: Failed to get VFS tracim data\n"));
+        return result;
+    }
 
-    DEBUG(0, ("Tracim: tracim_closedir called\n"));
-	
+    request = json_object();
+    json_object_set_new(request, "op", json_string("closedir"));
+    json_object_set_new(request, "handle", json_integer(fd));
+    json_object_set_new(request, "user", json_string(data->user));
+    response = send_request(data, request);
+    json_decref(request);
+	if (!response) {
+		DEBUG(0, ("tracim: Failed to get response for closedir\n"));
+		return result;
+	}
+    success_obj = json_object_get(response, "success");
+	if (!success_obj) {
+		if (json_is_true(success_obj)) {
+			result = 0;
+		} else {
+			entry_obj = json_object_get(response, "error");
+			DEBUG(0, ("Tracim: tracim_closedir failed: %s\n", json_string_value(entry_obj)));
+		}
+	} else {
+		DEBUG(0, ("Tracim: tracim_closedir failed\n"));
+	}
+    json_decref(response);
     return result;
 }
 /**
@@ -733,26 +767,61 @@ static int tracim_closedir(vfs_handle_struct *handle,
 int tracim_fstatat(
 		struct vfs_handle_struct *handle, const struct files_struct *dirfsp,
 		const struct smb_filename *smb_fname, SMB_STRUCT_STAT *sbuf, int flags) {
-    DEBUG(0, ("Tracim: tracim_fstatat()\n"));
+    DEBUG(0, ("Tracim: tracim_fstatat() : TODO\n"));
 	return 0;
 }
+/**
+ * @brief Fill the 'value', wich mustn't exceed 'size' bytes
+ * 
+ * @param handle 
+ * @param fsp 
+ * @param name 
+ * @param value 
+ * @param size 
+ * @return ssize_t : size of value
+ */
 ssize_t tracim_fgetxattr(struct vfs_handle_struct *handle, struct files_struct *fsp,
 	const char *name, void *value, size_t size)
 {
-    DEBUG(0, ("Tracim: tracim_fgetxattr()\n"));
-	return 0;
+    DEBUG(0, ("Tracim: tracim_fgetxattr(%s, %s)\n", fsp->fsp_name->base_name, name));
+	ssize_t result = 0;
+	memset(value, 0, size);
+	// ssize_t result = SMB_VFS_NEXT_GETXATTR(handle, fsp, name, value, size);
+	return result;
 }
+/**
+ * @brief Fill 'list' : a char* of size 'size'.
+ * 
+ * @param handle 
+ * @param fsp 
+ * @param list : Return list of char* ssize_t char* separated by \0
+ * @param size 
+ * @return ssize_t 
+ */
 ssize_t tracim_flistxattr(struct vfs_handle_struct *handle, struct files_struct *fsp,
 	char *list, size_t size)
 {
-    DEBUG(0, ("Tracim: tracim_flistxattr()\n"));
+    DEBUG(0, ("Tracim: tracim_flistxattr(%s) : \n", fsp->fsp_name->base_name));
+	list[0] = '\0';
 	return 0;
 }
+int tracim_fsetxattr(struct vfs_handle_struct *handle, struct files_struct *fsp,
+	const char *name, const void *value, size_t size, int flags)
+{
+    DEBUG(0, ("Tracim: tracim_fsetxattr(%s, %s=%s) : TODO\n", fsp->fsp_name->base_name, name, (char*)value));
+	return 0;
+}
+int tracim_fremovexattr(struct vfs_handle_struct *handle, struct files_struct *fsp, const char *name)
+{
+    DEBUG(0, ("Tracim: tracim_fremovexattr(%s, %s) : TODO\n", fsp->fsp_name->base_name, name));
+	return 0;
+}
+
 static off_t tracim_lseek(vfs_handle_struct *handle, files_struct *fsp, off_t offset, int whence)
 {
     struct file_context *ctx = (struct file_context *)fsp->vfs_extension;
     off_t result;
-    DEBUG(0, ("Tracim: tracim_lseek()\n"));
+    DEBUG(0, ("Tracim: tracim_lseek() : TODO\n"));
 
     /* if (!ctx || ctx->is_directory) {
         errno = EISDIR;
@@ -784,13 +853,15 @@ static struct vfs_fn_pointers tracim_functions = {
 	.fstat_fn = tracim_fstat,
 	.fstatat_fn = tracim_fstatat,
 	.lstat_fn = tracim_lstat,
-
-	.fgetxattr_fn = tracim_fgetxattr,
-	.flistxattr_fn = tracim_flistxattr,
  
     .pwrite_fn = tracim_pwrite,
     .unlinkat_fn = tracim_unlinkat,
 
+    .fgetxattr_fn = tracim_fgetxattr,
+    .fsetxattr_fn = tracim_fsetxattr,
+    .fremovexattr_fn = tracim_fremovexattr,
+    .flistxattr_fn = tracim_flistxattr,
+ 
     .fdopendir_fn = tracim_opendir,
     .readdir_fn = tracim_readdir,
     .closedir_fn = tracim_closedir

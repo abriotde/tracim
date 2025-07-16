@@ -89,7 +89,8 @@ function load_samba_source {
 		exit 1
 	fi
 	SMBD_VERSION=$(smbd --version | awk -F" |-" '{print $2}')
-	git tag -l | grep "^samba-$SMBD_VERSION$"
+	cd $SAMBA_SOURCE
+	git tag -l | grep "^samba-$SMBD_VERSION\$"
 	if [ $? -eq 0 ]; then
 		echo "Samba git checkout to matches your smbd server version ($SMBD_VERSION). git checkout --force tags/samba-$SMBD_VERSION"
 		git checkout --force tags/samba-$SMBD_VERSION > /dev/null
@@ -239,7 +240,7 @@ function run_samba_vfs_service {
 }
 
 # install_deps
-# load_samba_source
+load_samba_source
 compile_vfs_module
 install_vfs_module
 install_samba_vfs_service

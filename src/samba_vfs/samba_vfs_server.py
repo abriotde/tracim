@@ -18,7 +18,7 @@ class SambaVFSServer:
 
     MAX_RESPONSE_SIZE = 32768
     MAX_REQUEST_SIZE = 65536
-    SOCKET_ENCODING = "utf-8"
+    # SOCKET_ENCODING = "utf-8"
     SOCKET_ENCODING = "ascii"
 
     def __init__(self, service, socket:str=None):
@@ -96,12 +96,12 @@ class SambaVFSServer:
                 except json.JSONDecodeError as e:
                     logger.error(self, f"Invalid JSON: '{d}' : error {e}")
                     response = {"success": False, "error": "Invalid JSON request"}
-                    conn.sendall(json.dumps(response).encode(encoding=self.SOCKET_ENCODING))
+                    conn.sendall((json.dumps(response)+"\n").encode(encoding=self.SOCKET_ENCODING))
                     continue
                 response = self.process_request(request)
                 
                 # Send response
-                resp = json.dumps(response).encode(encoding=self.SOCKET_ENCODING)
+                resp = (json.dumps(response)+"\n").encode(encoding=self.SOCKET_ENCODING)
                 logger.warning(self, f"send response {resp}")
                 assert(len(resp)<self.MAX_RESPONSE_SIZE)
                 conn.sendall(resp)

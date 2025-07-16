@@ -79,9 +79,6 @@ class FileSystemService:
         if write_required and not file_info.get("can_write", False):
             return {"success": False, "error": "Permission denied (write)"}
         
-        # This is where you'd call your actual database library
-        # return self.db.open_file(path, username, flags, mode)
-        
         # Placeholder - store file info for later operations
         handle_id = self.next_handle_id
         self.next_handle_id += 1
@@ -175,7 +172,7 @@ class FileSystemService:
         # In a real implementation, you'd commit changes to the database here
         logger.info(self, f"Closed file {file_info['path']}")
         
-        return {"success": True}
+        return {"success":True, "fd":handle, "path":"PATH"}
     
     def open_directory(self, path: str, username: str, mask: str) -> Dict[str, Any]:
         """Open a directory for reading."""
@@ -201,7 +198,7 @@ class FileSystemService:
         
         # Simulate directory entries based on path
         entries = []
-        if path == "/":
+        if path in ["/", "."]:
             # Root directory - show user-specific directory for this user
             entries = [f"user_{username}"]
         elif path == f"/user_{username}":
@@ -218,21 +215,19 @@ class FileSystemService:
         
         return {
             "success": True,
-            "handle": handle_id
+            "handle": handle_id,
+            "entries": entries
         }
     
     def read_directory(self, handle: int) -> Dict[str, Any]:
         """Read the next entry from a directory."""
         logger.info(self, f"Reading from directory handle {handle}")
-        
         if handle not in self.dir_handles:
             return {"success": False, "error": "Invalid directory handle"}
-        
         dir_info = self.dir_handles[handle]
         entries = dir_info["entries"]
         position = dir_info["position"]
-        
-        # Check if we've reached the end
+        logger.info(self, f"read_directory(fd={handle}) : entries={entries}, position={position}")
         if position >= len(entries):
             return {"success": False, "error": "No more entries"}
         
@@ -262,14 +257,10 @@ class FileSystemService:
         if handle not in self.dir_handles:
             return {"success": False, "error": "Invalid directory handle"}
         
-        # This is where you'd call your actual database library
-        # return self.db.close_directory(handle)
-        
-        # Clean up handle
+		# Clean up handle
         dir_info = self.dir_handles.pop(handle)
         logger.info(self, f"Closed directory {dir_info['path']}")
-        
-        return {"success": True}
+        return {"success":True, "handle":handle}
 
     def init_connection(self, service: str, user: str) -> Dict[str, Any]:
         """Initialize a new connection."""

@@ -5,6 +5,16 @@ Run:
  
 	$ sudo ./install.sh
 
+On fail : 
+
+In samba/bin/default/docs-xml/smbdotconf/parameters.all.xml
+
+- Remove 1 of double definition of "neutralize_nt4_emulation".
+
+- Remove all "Himmelblaud" definitions.
+
+And relaunch script.
+
 # Documentation
 
 ## For Samba VFS C part:
