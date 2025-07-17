@@ -8,7 +8,7 @@ import os
 import json
 import socket
 import threading
-import logging
+import traceback
 from typing import Dict, Any
 import time
 from tracim_backend.lib.utils.logger import logger
@@ -123,7 +123,8 @@ class SambaVFSServer:
             if op == "init":
                 return self._fs_service.init_connection(
                     request.get("service", ""),
-                    request.get("user", "")
+                    request.get("user", ""),
+                    mount_point=request.get("mount", "/")
                 )
             elif op == "disconnect":
                 return self._fs_service.disconnect()
@@ -170,6 +171,14 @@ class SambaVFSServer:
                     request.get("data", ""),
                     request.get("size", 0)
                 )
+            elif op == "create":
+                return self._fs_service.create_file(
+                    request.get("path", ""),
+                    request.get("mode", 0),
+                    request.get("flags", 0),
+                    request.get("attr", 0),
+                    request.get("size", 0)
+                )
             elif op == "close":
                 return self._fs_service.close_file(
                     request.get("handle", -1)
@@ -192,5 +201,6 @@ class SambaVFSServer:
                 logger.warning(self, f"process_request({op}) : Unknown operation")
                 return {"success": False, "error": f"Unknown operation: {op}"}
         except Exception as e:
-            logger.error(self, f"Error processing request {op}: {e}")
+            tb = traceback.format_exc()
+            logger.error(self, f"Error processing request {op}: {e} : {tb}")
             return {"success": False, "error": str(e)}

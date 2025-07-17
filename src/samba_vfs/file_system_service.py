@@ -135,6 +135,8 @@ class FileSystemService:
         self.active_users:Dict[str, int] = {} # Index connection's id by username.
         self.next_handle_id = 1  # Incremental ID for file and directory handles, do not use 0 as it can be confused to NULL in C VFS cast.
         self.config = config
+        self._files = {}
+        self.mount_point = ""
 
     def get_file_info_fd(self, fd: int, username: str) -> Dict[str, Any]:
         finfo = self.file_handles.get(fd, None)
@@ -146,37 +148,12 @@ class FileSystemService:
         """Get information about a file or directory."""
         logger.info(self, f"Getting file info for {path} (user: {username})")
         # logger.info(self, f"Opened files are {self.file_handles}")
-        file_infos = {
-            "exists": False
-        }
-        if path in ["/",".","..","/var/lib/samba/tracim"]:
-            file_infos = {
-                "exists": True,
-                "is_directory": True,
-                "size": 16,
-                "mtime": int(time.time()),
-                "can_read": True,
-                "can_write": True
-            }
-        elif path == f"user_{username}":
-            file_infos = {
-                "exists": True,
-                "is_directory": True,
-                "size": 16,
-                "mtime": int(time.time()),
-                "can_read": True,
-                "can_write": True
-            }
-        elif path == f"user_{username}/test.txt":
-            file_infos = {
-                "exists": True,
-                "is_directory": False,
-                "size": 1324,
-                "mtime": int(time.time()),
-                "can_read": True,
-                "can_write": True,
-                "content": "Hello, world!"
-            }
+        default_file_infos = {"exists": False}
+        path = os.path.normpath(path)
+        if path in [self.mount_point, "/"]:
+            path="."
+        file_infos = self._files.get(path, default_file_infos)
+        # logger.info(self, f"file_infos: {file_infos}")
         return file_infos
     
     def open_file(self, path: str, username: str, flags: int, mode: int) -> Dict[str, Any]:
@@ -274,7 +251,27 @@ class FileSystemService:
             "success": True,
             "bytes_written": size
         }
-    
+
+    def create_file(self, path:str="", mode=0, flags=0, attr=0, size=0) -> Dict[str, Any]:
+        if path=="":
+            return {
+                "success": False,
+                "error": "No path given"
+            }
+        path = os.path.normpath(path)
+        self._files[path] = {
+            "exists": True,
+            "is_directory": False,
+            "size": size,
+            "mtime": int(time.time()),
+            "can_read": True,
+            "can_write": True
+        }
+        return {
+			"success": True,
+			"size": size
+		}
+
     def close_file(self, handle: int) -> Dict[str, Any]:
         """Close a file handle."""
         if handle not in self.file_handles:
@@ -307,13 +304,14 @@ class FileSystemService:
         # logger.info(self, f"workspace files : {files}")
         # Simulate directory entries based on path
         entries = []
-        if path in ["/", "."]:
-            # Root directory - show user-specific directory for this user
-            entries = [f"user_{username}"]
-        elif path == f"user_{username}":
-            # User's home directory - show some files
-            entries = ["test.txt", "docs"]
-        
+        path = os.path.normpath(path)
+        if path.strip()==".":
+            path=""
+        for fpath in self._files.keys():
+            fpath_parent = os.path.dirname(fpath)
+            logger.info(self, f"Test2 {fpath_parent} : {path}")
+            if fpath_parent==path and path not in [".",".."]:
+                entries.append(os.path.basename(fpath))
         self.dir_handles[handle_id] = SambaVFSFileHandler(
             path= path,
             username= username,
@@ -368,7 +366,7 @@ class FileSystemService:
         logger.info(self, f"Closed directory {dir_info.path}")
         return {"success":True, "handle":handle}
 
-    def init_connection(self, service: str, user: str) -> Dict[str, Any]:
+    def init_connection(self, service:str, user:str, mount_point:str="/") -> Dict[str, Any]:
         """Initialize a new connection."""
         logger.info(self, f"Initializing connection for service {service}, user {user}")
         
@@ -376,21 +374,58 @@ class FileSystemService:
         # return self.db.init_connection(service, user)
         
         # Placeholder
+        self.mount_point = os.path.normpath(mount_point)
         conn_id = self.next_handle_id
         self.next_handle_id += 1
         context = SambaVFSTracimContext(self.config, "TheAdmin") # TODO User is set in hardcoded to 'TheAdmin' should be 'user'
-        workspace_container = WorkspaceAndContentContainer(
+        """ workspace_container = WorkspaceAndContentContainer(
             path="/",
             environ={},
             label="",
+            content=None,
             workspace=None,
-            tracim_context=context,
-            provider=self.provider,
-            list_orphan_workspaces=True,
-        )
-        session = SambaVFSSession(service, user, time.time(), workspace_container)
+            provider=None,
+            tracim_context=context
+        ) """
+        session = SambaVFSSession(service, user, time.time(), None)
         self.active_connections[conn_id] = session
         self.active_users[user] = conn_id
+        self._files = {
+        	".": {
+                "exists": True,
+                "is_directory": True,
+                "size": 16,
+                "mtime": int(time.time()),
+                "can_read": True,
+                "can_write": True
+            },
+        	f"user_{user}" : {
+                "exists": True,
+                "is_directory": True,
+                "size": 16,
+                "mtime": int(time.time()),
+                "can_read": True,
+                "can_write": True
+            },
+            f"user_{user}/test.txt" : {
+                "exists": True,
+                "is_directory": False,
+                "size": 1324,
+                "mtime": int(time.time()),
+                "can_read": True,
+                "can_write": True,
+                "content": "Hello, world!"
+            },
+            f"user_{user}/docs" : {
+                "exists": True,
+                "is_directory": False,
+                "size": 1324,
+                "mtime": int(time.time()),
+                "can_read": True,
+                "can_write": True,
+                "content": "My docs!"
+            }
+        }
         return {"success": True, "connection_id": conn_id}
 
     def _get_workspace(self, username:str):
