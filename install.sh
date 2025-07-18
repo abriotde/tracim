@@ -207,6 +207,9 @@ function install_vfs_module {
    read only = no
    browseable = yes
    $BASE_NAME:connection_string = dbname=myapp user=dbuser password=secret
+# Force use pred / pwrite because pread_recv / pread_send / pwrite_send / pwrite_recv are not implemented (lower performances)
+   aio read size = 0
+   aio write size = 0
 EOF
 	fi
 	# Create directory for the share

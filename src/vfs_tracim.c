@@ -758,14 +758,14 @@ static ssize_t tracim_pread(vfs_handle_struct *handle, files_struct *fsp,
                             void *data_buf, size_t n, off_t offset)
 {
 	DEBUG(0, ("Tracim: tracim_pread() : TODO.\n"));
-    struct tracim_data *data = get_tracim_data(handle);
-    json_t *request, *response, *success_obj, *data_obj;
     ssize_t result = -1;
-    const char *encoded_data;
-    
+    struct tracim_data *data = get_tracim_data(handle);
     if (!data) {
-        return SMB_VFS_NEXT_PREAD(handle, fsp, data_buf, n, offset);
+        DEBUG(0, ("tracim_pread: Failed to get VFS tracim data\n"));
+        return result;
     }
+    json_t *request, *response, *success_obj, *data_obj;
+    const char *encoded_data;
     
     request = json_object();
     json_object_set_new(request, "op", json_string("read"));
@@ -775,7 +775,7 @@ static ssize_t tracim_pread(vfs_handle_struct *handle, files_struct *fsp,
     response = send_request(data, request);
     json_decref(request);
     if (!response) {
-        return SMB_VFS_NEXT_PREAD(handle, fsp, data_buf, n, offset);
+        return -1;
     }
     
     success_obj = json_object_get(response, "success");
@@ -788,11 +788,19 @@ static ssize_t tracim_pread(vfs_handle_struct *handle, files_struct *fsp,
                 size_t decoded_len = strlen(encoded_data) * 3 / 4; /* Rough estimate */
                 if (decoded_len <= n) {
                     /* Simple base64 decode - in production use proper base64 library */
-                    memcpy(data_buf, encoded_data, strlen(encoded_data));
+                    memcpy(data_buf, encoded_data, decoded_len);
                     result = strlen(encoded_data);
                 }
             }
         }
+        data_obj = json_object_get(response, "size");
+		if (data_obj && json_is_integer(data_obj)) {
+			int size = json_integer_value(data_obj);
+			if (size!=result) {
+				DEBUG(0, ("Tracim: tracim_pread() : Warning : size conflict : %d VS %ld.\n", size, result));
+				result = size;
+			}
+		}
     }
     
     json_decref(response);
@@ -883,6 +891,22 @@ uint64_t tracim_disk_free(struct vfs_handle_struct *handle,
 	*dsize = 1000;
     return ret;
 }
+int tracim_get_quota (struct vfs_handle_struct *handle,
+				const struct smb_filename *smb_fname,
+				enum SMB_QUOTA_TYPE qtype,
+				unid_t id,
+				SMB_DISK_QUOTA *qt)
+{
+    DEBUG(0, ("Tracim: tracim_get_quota() : TODO\n"));
+	qt->bsize = 4096;
+	qt->hardlimit = 1000; // In bsize units
+	qt->softlimit = 1000; // In bsize units
+	qt->curblocks = 1; // In bsize units
+	qt->ihardlimit = 1000; // inode hard limit.
+	qt->isoftlimit = 1000; // inode soft limit.
+	qt->curinodes = 1; // Current used inodes.
+
+}
 NTSTATUS tracim_create_file(struct vfs_handle_struct *handle,
 				   struct smb_request *req,
 				   struct files_struct *dirfsp,
@@ -918,16 +942,8 @@ NTSTATUS tracim_create_file(struct vfs_handle_struct *handle,
     int info = 0;
     
     DBG_DEBUG("Creating file: %s\n", fname);
-    
-    /* Initialize result */
     *result = NULL;
-    
-    /* Check if file exists */
-    if (lstat(fname, &st) == 0) {
-        file_existed = true;
-    }
-    
-    /* Handle create disposition */
+    /*// Handle create disposition
     switch (create_disposition) {
         case FILE_SUPERSEDE:
             open_flags = O_CREAT | O_TRUNC | O_RDWR;
@@ -971,31 +987,24 @@ NTSTATUS tracim_create_file(struct vfs_handle_struct *handle,
         default:
             return NT_STATUS_INVALID_PARAMETER;
     }
-    
-    /* Handle access mask */
     if (access_mask & FILE_WRITE_DATA) {
-        /* Already set O_RDWR above */
+        // Already set O_RDWR above
     } else if (access_mask & FILE_READ_DATA) {
         open_flags &= ~O_RDWR;
         open_flags |= O_RDONLY;
     }
-    
-    /* Handle create options */
+
     if (create_options & FILE_DELETE_ON_CLOSE) {
-        /* Note: Real implementation would need to track this */
         DBG_DEBUG("Delete on close requested for %s\n", fname);
-    }
+    } */
     
     if (create_options & FILE_DIRECTORY_FILE) {
-        /* Create directory instead */
         if (mkdir(fname, 0755) != 0) {
             if (errno == EEXIST && create_disposition == FILE_OPEN_IF) {
-                /* Directory exists, that's OK */
             } else {
                 return map_nt_error_from_unix(errno);
             }
         }
-        /* For directories, we don't open a file descriptor */
         fd = -1;
     } else {
 		struct tracim_data *data = get_tracim_data(handle);
@@ -1023,19 +1032,19 @@ NTSTATUS tracim_create_file(struct vfs_handle_struct *handle,
 			success_obj = json_object_get(response, "error");
 			if (success_obj) {
 				DEBUG(0, ("tracim_create_file: ERROR : %s.", fname));
+				return NT_STATUS_ABANDONED;
 			}
 		}
 		json_decref(response);
     }
     
-    /* Allocate and initialize files_struct */
+    // Allocate and initialize files_struct
     status = file_new(req, conn, &fsp);
     if (!NT_STATUS_IS_OK(status)) {
         if (fd != -1) close(fd);
         return status;
     }
-    
-    /* Set up the files_struct */
+	/*
 	fsp_set_fd(fsp, fd);
     fsp->fsp_name = cp_smb_filename(fsp, smb_fname);
     if (fsp->fsp_name == NULL) {
@@ -1043,15 +1052,12 @@ NTSTATUS tracim_create_file(struct vfs_handle_struct *handle,
         if (fd != -1) close(fd);
         return NT_STATUS_NO_MEMORY;
     }
-    
-    /* Set file position and other attributes */
     // fsp->fh->position_information = 0;
     // fsp->fh->private_options = private_flags;
     fsp->access_mask = access_mask;
     fsp->share_mode_flags = share_access;
     // fsp->fh->gen_id = get_gen_count();
     
-    /* Handle directory vs file specifics */
     if (create_options & FILE_DIRECTORY_FILE) {
         fsp->fsp_flags.is_directory = true;
 		fsp_set_fd(fsp, -1);
@@ -1060,23 +1066,17 @@ NTSTATUS tracim_create_file(struct vfs_handle_struct *handle,
         /* if (fstat(fd, &st) == 0) {
             // fsp->file_id = vfs_file_id_from_sbuf(conn, &st);
             // fsp->fh->file_size = st.st_size;
-        } */
-    }
-    
-    /* Set oplock info */
+        } * /
+    }*/
     fsp->oplock_type = NO_OPLOCK;
     if (oplock_request != NO_OPLOCK) {
-        /* Simplified: just grant exclusive oplock */
         fsp->oplock_type = EXCLUSIVE_OPLOCK;
     }
     
-    /* Add to files_struct list */
+    // Add to files_struct list
     DLIST_ADD(conn->sconn->files, fsp);
     conn->num_files_open++;
-    
-    /* Custom post-creation logic */
-    DBG_NOTICE("Successfully created file: %s (fd=%d, fsp=%p)\n", 
-               fname, fd, fsp);
+    DBG_NOTICE("Successfully created file: %s (fd=%d, fsp=%p)\n", fname, fd, fsp);
 
     *result = fsp;
     if (pinfo) {
@@ -1085,6 +1085,27 @@ NTSTATUS tracim_create_file(struct vfs_handle_struct *handle,
     return status;
 }
 
+/* Values for the second argument to `fcntl'.  */
+// 
+/**
+ * @brief Used to set/get metadata like blocking file. We need to implement it because otherwise it's samba use FS call on our fd.
+ * 
+ * @param handle
+ * @param fsp
+ * @param cmd
+ * @param cmd_arg 
+ * @return int 
+ */
+static int tracim_fcntl(vfs_handle_struct *handle, files_struct *fsp, int cmd, va_list cmd_arg)
+{
+	void *argp;
+	va_list dup_cmd_arg;
+	int result = 0;
+	int val;
+	int fd = fsp_get_io_fd(fsp);
+    DEBUG(0, ("Tracim: tracim_fcntl(cmd=%d on fd=%d) : TODO\n", cmd, fd));
+	return result;
+}
 
 /* VFS operations structure for Samba 4.x : Not ok before */
 static struct vfs_fn_pointers tracim_functions = {
@@ -1113,7 +1134,11 @@ static struct vfs_fn_pointers tracim_functions = {
     .closedir_fn = tracim_closedir,
 
 	.disk_free_fn = tracim_disk_free,
+	.get_quota_fn = vfs_not_implemented_get_quota,
+	.set_quota_fn = vfs_not_implemented_set_quota,
+	// .get_quota_fn = tracim_get_quota
 	// .create_file_fn = tracim_create_file
+	.fcntl_fn = tracim_fcntl
 
 	// For best performances : pread_recv_fn && pread_send_fn && pwrite_recv_fn && pwrite_send_fn
 };

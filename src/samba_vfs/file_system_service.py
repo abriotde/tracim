@@ -197,10 +197,10 @@ class FileSystemService:
         """Read data from a file."""
         logger.info(self, f"Reading from handle {handle}, size {size}")
         
-        if handle not in self.file_handles:
-            return {"success": False, "error": "Invalid file handle"}
+        file_info = self.file_handles.get(handle, None)
+        if file_info is None:
+            return {"success": False, "error": "Invalid file handle {handle}."}
         
-        file_info = self.file_handles[handle]
         content = file_info.content
         position = file_info.position
         
@@ -213,8 +213,8 @@ class FileSystemService:
         
         return {
             "success": True,
-            "content": data,
-            "bytes_read": len(data)
+            "data": data,
+            "size": len(data)
         }
     
     def write_file(self, handle: int, data: str, size: int) -> Dict[str, Any]:

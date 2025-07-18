@@ -162,12 +162,12 @@ class SambaVFSServer:
                 )
             elif op == "read":
                 return self._fs_service.read_file(
-                    request.get("handle", -1),
+                    request.get("fd", -1),
                     request.get("size", 0)
                 )
             elif op == "write":
                 return self._fs_service.write_file(
-                    request.get("handle", -1),
+                    request.get("fd", -1),
                     request.get("data", ""),
                     request.get("size", 0)
                 )
