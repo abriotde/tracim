@@ -203,6 +203,11 @@ class SambaVFSServer:
                 return self._fs_service.close_directory(
                     request.get("handle", -1)
                 )
+            elif op == "unlink":
+                result = self._fs_service.unlink(
+                    request.get("path", -1),
+                    request.get("flags", -1)
+                )
             elif op == "lock":
                     result = self._fs_service.lock_file(
 						fd=request.get("fd", -1),
@@ -215,7 +220,10 @@ class SambaVFSServer:
             else:
                 logger.warning(self, f"process_request({op}) : Unknown operation")
                 return {"success": False, "error": f"Unknown operation: {op}"}
-            result["success"] = True
+            if isinstance(result, dict):
+                result["success"] = True
+            else:
+                result = {"success":True}
             return result
         except FileSystemException as e:
             return {"success":False, "error":e.message}

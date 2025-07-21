@@ -280,6 +280,16 @@ class FileSystemService:
             "data": data,
             "size": len(data)
         }
+
+    def unlink(self, path:str, flags:int) -> bool:
+        """
+        TODO
+        """
+        del self._files[path]
+        # Remove all opened files : Unix way is to wait they close there fd?
+        # foodict = {k: v for k, v in self._file_handles.items() if v.path!=path}
+        # self._file_handles = foodict
+        return True
     
     def write_file(self, handle: int, data: str, size: int, offset:int) -> Dict[str, Any]:
         """Write data to a file."""
