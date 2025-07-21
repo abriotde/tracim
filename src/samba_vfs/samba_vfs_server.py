@@ -169,15 +169,18 @@ class SambaVFSServer:
                 return self._fs_service.write_file(
                     request.get("fd", -1),
                     request.get("data", ""),
-                    request.get("size", 0)
+                    request.get("size", 0),
+                    request.get("offset", 0)
                 )
             elif op == "create":
                 return self._fs_service.create_file(
-                    request.get("path", ""),
-                    request.get("mode", 0),
-                    request.get("flags", 0),
-                    request.get("attr", 0),
-                    request.get("size", 0)
+                    path=request.get("path", ""),
+                    user=request.get("user", ""),
+                    mode=request.get("mode", 0),
+                    flags=request.get("flags", 0),
+                    attr=request.get("attr", 0),
+                    size=request.get("size", 0),
+                    is_dir=request.get("dir", 0)==1
                 )
             elif op == "close":
                 return self._fs_service.close_file(

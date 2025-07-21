@@ -217,59 +217,63 @@ class FileSystemService:
             "size": len(data)
         }
     
-    def write_file(self, handle: int, data: str, size: int) -> Dict[str, Any]:
+    def write_file(self, handle: int, data: str, size: int, offset:int) -> Dict[str, Any]:
         """Write data to a file."""
         logger.info(self, f"Writing to handle {handle}, size {size}")
         
-        if handle not in self.file_handles:
-            return {"success": False, "error": "Invalid file handle"}
-        
-        file_info = self.file_handles[handle]
+        file_info = self.file_handles.get(handle, None)
+        if file_info is None:
+            return {"success": False, "error": "Invalid file handle {handle}."}
         
         # Check write permission based on flags
-        write_allowed = (file_info["flags"] & os.O_WRONLY) or (file_info["flags"] & os.O_RDWR)
+        flag = file_info.flags
+        write_allowed = (flag & os.O_WRONLY) or (flag & os.O_RDWR)
         if not write_allowed:
             return {"success": False, "error": "File not opened for writing"}
-        
-        # This is where you'd call your actual database library
-        # return self.db.write_file(handle, data, size)
-        
+
         # Placeholder implementation
-        position = file_info.position
+        position = offset if offset>=0 else file_info.position
         content = file_info.content
-        
-        # If position is at the end, append
         if position >= len(content):
             file_info.content = content + data[:size]
         else:
-            # Otherwise, overwrite/insert
             file_info.content = content[:position] + data[:size] + content[position + size:]
-        
-        file_info.position += size
+        file_info.position = position+size
         
         return {
             "success": True,
-            "bytes_written": size
+            "size": size
         }
 
-    def create_file(self, path:str="", mode=0, flags=0, attr=0, size=0) -> Dict[str, Any]:
+    def create_file(self, path:str="", user:str="", 
+            mode=0, flags=0, attr=0, size=0, is_dir=False) -> Dict[str, Any]:
         if path=="":
             return {
                 "success": False,
                 "error": "No path given"
             }
         path = os.path.normpath(path)
-        self._files[path] = {
-            "exists": True,
-            "is_directory": False,
-            "size": size,
-            "mtime": int(time.time()),
-            "can_read": True,
-            "can_write": True
-        }
+        file_info = self._files.get(path, None)
+        if file_info is None:
+            self._files[path] = {
+                "exists": True,
+                "is_directory": is_dir,
+                "size": size,
+                "mtime": int(time.time()),
+                "can_read": True,
+                "can_write": True
+            }
+        else:
+            is_dir = file_info.get("is_directory", False)
+        if is_dir:
+            finfo = self.open_directory(path, user, mode)
+        else:
+            finfo = self.open_file(path, user, flags, mode)
+        
         return {
 			"success": True,
-			"size": size
+			"size": size,
+            "fd": finfo.get("handle", -1)
 		}
 
     def close_file(self, handle: int) -> Dict[str, Any]:
@@ -279,7 +283,7 @@ class FileSystemService:
         file_info = self.file_handles.pop(handle)
         logger.info(self, f"Closed file {handle} : {file_info.path}")
         return {"success":True, "fd":handle, "path":file_info.path}
-    
+
     def open_directory(self, path: str, username: str, mask: str) -> Dict[str, Any]:
         """Open a directory for reading."""
         logger.info(self, f"Opening directory {path} (user: {username})")
