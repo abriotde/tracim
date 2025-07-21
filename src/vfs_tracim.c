@@ -1460,11 +1460,12 @@ static ssize_t tracim_pwrite(vfs_handle_struct *handle, files_struct *fsp,
     }
     success_obj = json_object_get(response, "success");
     if (success_obj && json_is_true(success_obj)) {
+		result = n;
         bytes_obj = json_object_get(response, "size");
         if (bytes_obj && json_is_integer(bytes_obj)) {
             int size = json_integer_value(bytes_obj);
-			if (size!=result) {
-				DEBUG(0, ("Tracim: tracim_pwrite() : Warning : size conflict : %d VS %ld.\n", size, result));
+			if (size!=n) {
+				DEBUG(0, ("Tracim: tracim_pwrite() : Warning : size conflict : %d VS %ld.\n", size, n));
 				result = size;
 			}
         }
@@ -1906,7 +1907,7 @@ NTSTATUS tracim_create_file(struct vfs_handle_struct *handle,
 		pinfo, in_context_blobs, out_context_blobs);
 	if (!NT_STATUS_IS_OK(status)) {
     	DEBUG(0, ("tracim_create_file: Fail created file: %s (fd=%d), force : TODO\n", fname, fd));
-		return NT_STATUS_OK;
+		return status;
 	}
     // Add to files_struct list
     // DLIST_ADD(conn->sconn->files, fsp);
@@ -1958,6 +1959,202 @@ err_out:
 	errno = EINVAL;
 	return -1;
 }
+/**
+ * @brief https://lwn.net/Articles/586904/
+ * 
+ * @param handle 
+ * @param fd 
+ * @param cmd 
+ * @param flock 
+ * @return int 
+ */
+int tracim_posix_lock(vfs_handle_struct *handle, int fd, int cmd, struct flock *flock)
+{
+	struct tracim_data *data = get_tracim_data(handle);
+	char *encoded_data;
+	if (!data) {
+		return -1;
+	}
+    DEBUG(0, ("Tracim: tracim_lock(fd=%d, op=%d) : TODO\n", fd, cmd));
+	char * op;
+	json_t *request = json_object();
+	if (cmd == F_SETLK || cmd == F_SETLKW) {
+		flock->l_pid = getpid();
+		json_object_set_new(request, "len", json_integer(flock->l_len));
+		json_object_set_new(request, "pid", json_integer(flock->l_pid));
+		json_object_set_new(request, "start", json_integer(flock->l_start));
+		char * type;
+		if(flock->l_type & F_RDLCK) {
+			if(flock->l_type & F_WRLCK) {
+				type = "rw";
+			} else type = "r";
+		} else if(flock->l_type & F_WRLCK) {
+			type = "w";
+		} else if(flock->l_type == F_UNLCK) {
+			type = "un";
+		}
+		json_object_set_new(request, "type", json_string(type));
+		char * whence;
+		switch(flock->l_whence) {
+			case SEEK_SET:
+				whence = "set";
+				break;
+			case SEEK_CUR:
+				whence = "cur";
+				break;
+			default: // case SEEK_END:
+				whence = "end";
+				break;
+		}
+		json_object_set_new(request, "whence", json_string(whence));
+	} else if (cmd == F_GETLK) {
+	}
+	json_object_set_new(request, "op", json_string("lock"));
+	json_object_set_new(request, "fd", json_integer(fd));
+	json_t *response = send_request(data, request);
+	json_decref(request);
+    if (!response) {
+        DEBUG(0, ("tracim_lock: Failed to get response\n"));
+        return -1; // SMB_VFS_NEXT_OPENAT(handle, dirfsp, smb_fname, fsp, how);
+    }
+    json_t *success_obj = json_object_get(response, "success");
+    if (success_obj && json_is_true(success_obj)) {
+		if (cmd == F_SETLK || cmd == F_SETLKW) {
+			DEBUG(0, ("tracim_lock: S.\n"));
+		} else if (cmd == F_GETLK) {
+			DEBUG(0, ("tracim_lock: G.\n"));
+			success_obj = json_object_get(response, "len");
+			if(success_obj && json_is_integer(success_obj)) {
+				flock->l_len = json_integer_value(success_obj);
+			}
+			success_obj = json_object_get(response, "pid");
+			if(success_obj && json_is_integer(success_obj)) {
+				flock->l_pid = json_integer_value(success_obj);
+			}
+			success_obj = json_object_get(response, "start");
+			if(success_obj && json_is_integer(success_obj)) {
+				flock->l_start = json_integer_value(success_obj);
+			}
+			success_obj = json_object_get(response, "type");
+			if(success_obj && json_is_string(success_obj)) {
+				const char *str = json_string_value(success_obj);
+				flock->l_type = 0;
+				if (strcmp(str, "un") == 0) {
+					flock->l_type = F_UNLCK;
+				} else {
+					if (strstr(str, "w") != NULL) {
+						flock->l_type |= F_WRLCK;
+					}
+					if (strstr(str, "r") != NULL) {
+						flock->l_type |= F_RDLCK;
+					}
+				}
+			}
+			success_obj = json_object_get(response, "whence");
+			if(success_obj && json_is_string(success_obj)) {
+				const char *str = json_string_value(success_obj);
+				flock->l_whence = 0;
+				if (strcmp(str, "set") == 0) {
+					flock->l_whence = SEEK_SET;
+				} else if (strcmp(str, "cur") == 0) {
+					flock->l_whence = SEEK_CUR;
+				} else if (strcmp(str, "end") == 0) {
+					flock->l_whence = SEEK_END;
+				}
+			}
+		}
+    } else {
+		success_obj = json_object_get(response, "error");
+		if (success_obj) {
+			DEBUG(0, ("tracim_lock() : ERROR : %s.", json_string_value(success_obj)));
+  			json_decref(response);
+			return -1;
+		}
+    }
+    json_decref(response);
+	return 0;
+}
+/**
+ * @brief 
+ * 
+ * @param handle 
+ * @param fsp 
+ * @param op 
+ * @param offset 
+ * @param count 
+ * @param type
+ * @return true 
+ * @return false 
+ */
+static bool tracim_lock(struct vfs_handle_struct *handle,
+			     files_struct *fsp, int op, off_t offset,
+			     off_t count, int type)
+{
+    int fd = fsp_get_io_fd(fsp);
+    DEBUG(0, ("Tracim: tracim_lock(op=%d on fd=%d) : TODO\n", op, fd));
+	struct flock flock = { 0, };
+	int ret;
+	bool ok = false;
+	flock.l_type = type; // F_RDLCK  F_WRLCK  F_UNLCK
+	flock.l_whence = SEEK_SET; // SEEK_SET SEEK_CUR SEEK_END
+	flock.l_start = offset;
+	flock.l_len = count;
+	flock.l_pid = 0;
+	ret = tracim_posix_lock(handle, fd, op, &flock);
+	if (op == F_GETLK) {
+		/* lock query, true if someone else has locked */
+		if ((ret != -1) &&
+		    (flock.l_type != F_UNLCK) &&
+		    (flock.l_pid != 0) && (flock.l_pid != getpid())) {
+			ok = true;
+			goto out;
+		}
+		ok = false;
+		goto out;
+	}
+	if (ret == -1) {
+		ok = false;
+		goto out;
+	}
+	ok = true;
+out:
+	return ok;
+}
+/**
+ * @brief 
+ * 
+ * @param handle 
+ * @param fsp 
+ * @param poffset 
+ * @param pcount 
+ * @param ptype 
+ * @param ppid 
+ * @return true 
+ * @return false 
+ */
+static bool tracim_getlock(struct vfs_handle_struct *handle,
+				files_struct *fsp, off_t *poffset,
+				off_t *pcount, int *ptype, pid_t *ppid)
+{
+    int fd = fsp_get_io_fd(fsp);
+    DEBUG(0, ("Tracim: tracim_lockget(fd=%d) : TODO\n", fd));
+	struct flock flock = { 0, };
+	int ret;
+	flock.l_type = *ptype;
+	flock.l_whence = SEEK_SET;
+	flock.l_start = *poffset;
+	flock.l_len = *pcount;
+	flock.l_pid = 0;
+	ret = tracim_posix_lock(handle, fd, F_GETLK, &flock);
+	if (ret == -1) {
+		return false;
+	}
+	*ptype = flock.l_type;
+	*poffset = flock.l_start;
+	*pcount = flock.l_len;
+	*ppid = flock.l_pid;
+	return true;
+}
 
 /* VFS operations structure for Samba 4.x : Not ok before */
 static struct vfs_fn_pointers tracim_functions = {
@@ -1985,13 +2182,30 @@ static struct vfs_fn_pointers tracim_functions = {
     .readdir_fn = tracim_readdir,
     .closedir_fn = tracim_closedir,
 
+	.file_id_create_fn = NULL,
+	.fstreaminfo_fn = NULL,
+	.brl_lock_windows_fn = NULL,
+	.brl_unlock_windows_fn = NULL,
+	.strict_lock_check_fn = NULL,
+	.translate_name_fn = NULL,
+	.fsctl_fn = NULL,
+	/* NT ACL Operations */
+	.fget_nt_acl_fn = NULL,
+	.fset_nt_acl_fn = NULL,
+	.audit_file_fn = NULL,
+
 	.disk_free_fn = tracim_disk_free,
 	.get_quota_fn = vfs_not_implemented_get_quota,
 	.set_quota_fn = vfs_not_implemented_set_quota,
 	// .get_quota_fn = tracim_get_quota
 	.create_file_fn = tracim_create_file,
-	.fcntl_fn = tracim_fcntl
+	.fcntl_fn = tracim_fcntl,
 
+	.lock_fn = tracim_lock,
+	.getlock_fn = tracim_getlock
+	// .brl_lock_windows_fn = vfswrap_brl_lock_windows,
+	// .brl_unlock_windows_fn = vfswrap_brl_unlock_windows,
+	// .strict_lock_check_fn = vfswrap_strict_lock_check,
 	// For best performances : pread_recv_fn && pread_send_fn && pwrite_recv_fn && pwrite_send_fn
 };
 

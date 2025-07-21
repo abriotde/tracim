@@ -12,6 +12,9 @@ import traceback
 from typing import Dict, Any
 import time
 from tracim_backend.lib.utils.logger import logger
+from tracim_backend.lib.samba_vfs.file_system_service import (
+	FileSystemException, FLockType, FLockWhence
+)
 
 class SambaVFSServer:
     """Server that listens on a Unix domain socket and handles requests."""
@@ -200,9 +203,22 @@ class SambaVFSServer:
                 return self._fs_service.close_directory(
                     request.get("handle", -1)
                 )
+            elif op == "lock":
+                    result = self._fs_service.lock_file(
+						fd=request.get("fd", -1),
+						len=request.get("len", -1),
+						pid=request.get("pid", -1),
+						start=request.get("start", -1),
+						type=FLockType.fromStr(request.get("type", "")),
+						whence=FLockWhence.fromStr(request.get("whence", ""))
+					).toDict()
             else:
                 logger.warning(self, f"process_request({op}) : Unknown operation")
                 return {"success": False, "error": f"Unknown operation: {op}"}
+            result["success"] = True
+            return result
+        except FileSystemException as e:
+            return {"success":False, "error":e.message}
         except Exception as e:
             tb = traceback.format_exc()
             logger.error(self, f"Error processing request {op}: {e} : {tb}")

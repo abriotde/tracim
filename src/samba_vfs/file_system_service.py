@@ -3,6 +3,7 @@ import os
 from typing import Dict, Any, Optional
 import time
 import typing
+from enum import Enum
 from dataclasses import dataclass, field
 from pluggy import PluginManager
 from tracim_backend.config import CFG
@@ -16,6 +17,69 @@ from tracim_backend.lib.utils.logger import logger
 from tracim_backend.lib.utils.request import TracimContext
 from tracim_backend.lib.webdav.resources import WorkspaceAndContentContainer
 from tracim_backend.lib.webdav.dav_provider import ProcessedWebdavPath
+
+class FileSystemException(Exception):
+    def __init__(self, message):
+        super().__init__(*args)
+        self.message = message
+
+class FLockType(Enum):
+    RDLCK = 1
+    WRLCK = 2
+    RWLCK = 3
+    UNLCK = 4
+
+    def __str__(self):
+        if self==FLockType.RDLCK:
+                return "r"
+        if self==FLockType.WRLCK:
+                return "w"
+        if self==FLockType.RWLCK:
+                return "rw"
+        if self==FLockType.UNLCK:
+                return "un"
+    def fromStr(value:str):
+        for member in FLockType:
+            if str(member)==value:
+                return member
+        return FLockType.UNLCK
+
+
+class FLockWhence(Enum):
+    SEEK_SET = 1
+    SEEK_CUR = 2
+    SEEK_END = 3
+
+    def __str__(self):
+        if self==FLockWhence.SEEK_SET:
+                return "set"
+        if self==FLockWhence.SEEK_CUR:
+                return "cur"
+        if self==FLockWhence.SEEK_END:
+                return "end"
+
+    def fromStr(value:str):
+        for member in FLockType:
+            if str(member)==value:
+                return member
+        return FLockType.UNLCK
+
+@dataclass
+class FLock:
+	type:FLockType # F_RDLCK  F_WRLCK  F_UNLCK
+	whence:FLockWhence # SEEK_SET SEEK_CUR SEEK_END
+	start:int
+	len:int
+	pid:int
+
+	def toDict(self):
+		return {
+        	"type": str(self.type), 
+			"whence": str(self.whence),
+			"start": self.start,
+            "len": self.len,
+            "pid": self.pid
+          }
 
 @dataclass
 class SambaVFSSession:
@@ -129,7 +193,7 @@ class FileSystemService:
         # self.db = db_lib.connect()
         self.db = None  # Placeholder - replace with your actual DB connection
         logger.info(self, "Tracim file service initialized")
-        self.file_handles:Dict[int, SambaVFSFileHandler] = {}  # Store open file handles
+        self._file_handles:Dict[int, SambaVFSFileHandler] = {}  # Store open file handles
         self.dir_handles:Dict[int, SambaVFSFileHandler] = {}  # Store open directory handles
         self.active_connections:Dict[int, SambaVFSSession] = {}  # Store active connections
         self.active_users:Dict[str, int] = {} # Index connection's id by username.
@@ -139,7 +203,7 @@ class FileSystemService:
         self.mount_point = ""
 
     def get_file_info_fd(self, fd: int, username: str) -> Dict[str, Any]:
-        finfo = self.file_handles.get(fd, None)
+        finfo = self._file_handles.get(fd, None)
         if finfo is None:
             return {"exists": False}
         return self.get_file_info(finfo.path, username)
@@ -147,7 +211,7 @@ class FileSystemService:
     def get_file_info(self, path: str, username: str) -> Dict[str, Any]:
         """Get information about a file or directory."""
         logger.info(self, f"Getting file info for {path} (user: {username})")
-        # logger.info(self, f"Opened files are {self.file_handles}")
+        # logger.info(self, f"Opened files are {self._file_handles}")
         default_file_infos = {"exists": False}
         path = os.path.normpath(path)
         if path in [self.mount_point, "/"]:
@@ -159,7 +223,7 @@ class FileSystemService:
     def open_file(self, path: str, username: str, flags: int, mode: int) -> Dict[str, Any]:
         """Open a file and return a handle to it."""
         logger.info(self, f"Opening file {path} (user: {username}, flags: {flags})")
-        # logger.info(self, f"Opened files are {self.file_handles}")
+        # logger.info(self, f"Opened files are {self._file_handles}")
         
         # Check if file exists and user has permissions
         file_info = self.get_file_info(path, username)
@@ -180,13 +244,13 @@ class FileSystemService:
         handle_id = self.next_handle_id
         self.next_handle_id += 1
         
-        self.file_handles[handle_id] = SambaVFSFileHandler(
-            path= path,
-            username= username,
-            flags= flags,
-            mode= mode,
-            position= 0,
-            content= file_info.get("content", "")
+        self._file_handles[handle_id] = SambaVFSFileHandler(
+            path=path,
+            username=username,
+            flags=flags,
+            mode=mode,
+            position=0,
+            content=file_info.get("content", "")
 		)
         return {
             "success": True,
@@ -197,7 +261,7 @@ class FileSystemService:
         """Read data from a file."""
         logger.info(self, f"Reading from handle {handle}, size {size}")
         
-        file_info = self.file_handles.get(handle, None)
+        file_info = self._file_handles.get(handle, None)
         if file_info is None:
             return {"success": False, "error": "Invalid file handle {handle}."}
         
@@ -221,7 +285,7 @@ class FileSystemService:
         """Write data to a file."""
         logger.info(self, f"Writing to handle {handle}, size {size}")
         
-        file_info = self.file_handles.get(handle, None)
+        file_info = self._file_handles.get(handle, None)
         if file_info is None:
             return {"success": False, "error": "Invalid file handle {handle}."}
         
@@ -276,11 +340,39 @@ class FileSystemService:
             "fd": finfo.get("handle", -1)
 		}
 
+    def lock_file(self, fd, len, pid, start, type:FLockType, whence:FLockWhence):
+        """
+        Work 'like' posix lock()
+        """
+        f_getlck = (pid == -1)
+        finfo = self._file_handles.get(fd, None)
+        if finfo is None:
+            raise Exception("No such file.")
+        lock_infos = self._files.get(finfo.path).get("lock", None)
+        if lock_infos is None:
+            lock_infos = FLock(FLockType.UNLCK, FLockWhence.SEEK_SET, 0, 0, pid)
+        if f_getlck:
+            return lock_infos
+        if lock_infos.type!=FLockType.UNLCK and pid!=lock_infos.pid: # File was lock
+            raise FileSystemException("File '{finfo.path}' already locked by another pid ({pid}!={lock_infos.pid}).")
+        elif type==FLockType.UNLCK and pid!=lock_infos.pid: # Want to unlock file
+            raise FileSystemException("Can't unlock '{finfo.path}' whitch is locked by another pid ({pid}!={lock_infos.pid}).")
+        
+        lock_infos.len = len
+        lock_infos.pid = pid
+        lock_infos.start = start
+        lock_infos.type = type
+        lock_infos.whence = whence
+        return lock_infos
+            
+            
+        
+
     def close_file(self, handle: int) -> Dict[str, Any]:
         """Close a file handle."""
-        if handle not in self.file_handles:
+        if handle not in self._file_handles:
             return {"success": False, "error": "Invalid file handle"}
-        file_info = self.file_handles.pop(handle)
+        file_info = self._file_handles.pop(handle)
         logger.info(self, f"Closed file {handle} : {file_info.path}")
         return {"success":True, "fd":handle, "path":file_info.path}
 
