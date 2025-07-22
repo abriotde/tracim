@@ -285,7 +285,7 @@ class FileSystemService:
         """
         TODO
         """
-        del self._files[path]
+        # del self._files[path]
         # Remove all opened files : Unix way is to wait they close there fd?
         # foodict = {k: v for k, v in self._file_handles.items() if v.path!=path}
         # self._file_handles = foodict
@@ -374,8 +374,18 @@ class FileSystemService:
         lock_infos.type = type
         lock_infos.whence = whence
         return lock_infos
-            
-            
+    
+    def rename_file(self, src:str, dst:str, srcfd:int, dstfd:int):
+        """
+        Work 'like' posix lock()
+        """
+        src_finfo = self._files.get(src, None)
+        dst_finfo = self._files.get(dst, None)
+        if dst_finfo is not None:
+            raise FileSystemException("Can't rename {src}, destination file path ever exists ({dst}).")
+        self._files[dst] = src_finfo
+        del self._files[src]
+        return True
         
 
     def close_file(self, handle: int) -> Dict[str, Any]:

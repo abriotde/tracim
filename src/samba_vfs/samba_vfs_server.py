@@ -217,6 +217,13 @@ class SambaVFSServer:
 						type=FLockType.fromStr(request.get("type", "")),
 						whence=FLockWhence.fromStr(request.get("whence", ""))
 					).toDict()
+            elif op == "rename":
+                    result = self._fs_service.rename_file(
+						src=request.get("src", ""),
+						dst=request.get("dst", ""),
+						srcfd=request.get("srcfd", 0),
+						dstfd=request.get("dstfd", 0)
+					)
             else:
                 logger.warning(self, f"process_request({op}) : Unknown operation")
                 return {"success": False, "error": f"Unknown operation: {op}"}

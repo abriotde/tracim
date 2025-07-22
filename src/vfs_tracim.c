@@ -8,6 +8,7 @@
 #include "smbd/globals.h"
 #include "smbd/smbd.h"
 #include "auth.h"
+#include "smb.h"
 #include "system/filesys.h"
 #include "security.h"
 #include "fake_file.h"
@@ -15,6 +16,7 @@
 #include "lib/util/tevent_ntstatus.h"
 #include "lib/util/sys_rw.h"
 #include "../librpc/gen_ndr/ioctl.h" // For create_file_unixpath()
+#include "librpc/gen_ndr/ndr_xattr.h"
 #include "smbd/fd_handle.h"
 #include <jansson.h>
 #include <sys/socket.h>
@@ -1143,7 +1145,7 @@ static int tracim_unlinkat(vfs_handle_struct *handle,
     int result = -1;
     
     if (!data) {
-        return SMB_VFS_NEXT_UNLINKAT(handle, dirfsp, smb_fname, flags);
+        return result;
     }
 	char * path = smb_fname->base_name;
 	if (smb_fname->fsp && smb_fname->fsp->fsp_name && smb_fname->fsp->fsp_name->base_name && strlen(smb_fname->fsp->fsp_name->base_name)>1) {
@@ -1152,7 +1154,7 @@ static int tracim_unlinkat(vfs_handle_struct *handle,
     request = json_object();
     json_object_set_new(request, "op", json_string("unlink"));
     json_object_set_new(request, "path", json_string(path));
-    json_object_set_new(request, "flags", json_integer(flags));
+	json_object_set_new(request, "fd", json_integer(fsp_get_pathref_fd(dirfsp)));
     response = send_request(data, request);
     json_decref(request);
     if (!response) {
@@ -1164,6 +1166,43 @@ static int tracim_unlinkat(vfs_handle_struct *handle,
     }
     json_decref(response);
     return result; // >= 0 ? result : SMB_VFS_NEXT_UNLINKAT(handle, dirfsp, smb_fname, flags);
+}
+
+static int tracim_renameat(vfs_handle_struct *handle,
+			  files_struct *srcfsp,
+			  const struct smb_filename *smb_fname_src,
+			  files_struct *dstfsp,
+			  const struct smb_filename *smb_fname_dst)
+{
+	DEBUG(0, ("Tracim: tracim_renameat().\n"));
+	int srcfd = fsp_get_pathref_fd(srcfsp);
+	char * src = smb_fname_src->base_name;
+	int dstfd = fsp_get_pathref_fd(dstfsp);
+	char * dst = smb_fname_dst->base_name;
+    struct tracim_data *data = get_tracim_data(handle);
+    json_t *request, *response, *success_obj;
+    int result = -1;
+    
+    if (!data) {
+        return result;
+    }
+    request = json_object();
+    json_object_set_new(request, "op", json_string("rename"));
+    json_object_set_new(request, "src", json_string(src));
+    json_object_set_new(request, "dst", json_string(dst));
+	json_object_set_new(request, "srcfd", json_integer(srcfd));
+	json_object_set_new(request, "dstfd", json_integer(dstfd));
+    response = send_request(data, request);
+    json_decref(request);
+    if (!response) {
+        return result;
+    }
+    success_obj = json_object_get(response, "success");
+    if (success_obj) {
+        result = json_is_true(success_obj) ? 0 : -1;
+    }
+    json_decref(response);
+    return result;
 }
 
 /**
@@ -1325,8 +1364,18 @@ static int tracim_closedir(vfs_handle_struct *handle, DIR *dirp)
     json_decref(response);
     return result;
 }
+enum ndr_err_code tracim_checker(struct ndr_push * s, ndr_flags_type ndr_flags, const void * r)
+{
+	return NDR_ERR_SUCCESS;
+}
 /**
- * @brief Fill the 'value', wich mustn't exceed 'size' bytes
+ * @brief Fill the 'value', wich mustn't exceed 'size' bytes. Used by fget_ea_dos_attribute called by default create_file_fn.
+ *  EA names used internally in Samba. KEEP UP TO DATE with prohibited_ea_names in trans2.c !.
+ * "user.SAMBA_PAI"  EA to use for DOS attributes
+ * "user.DOSATTRIB" Prefix for DosStreams in the vfs_streams_xattr module : Only one used?
+ * "user.DosStream." Prefix for xattrs storing streams.
+ * "user.SAMBA_STREAMS"  EA to use to store reparse points.
+ * #define SAMBA_XATTR_REPARSE_ATTRIB "user.SmbReparse"
  * 
  * @param handle 
  * @param fsp 
@@ -1338,11 +1387,23 @@ static int tracim_closedir(vfs_handle_struct *handle, DIR *dirp)
 ssize_t tracim_fgetxattr(struct vfs_handle_struct *handle, struct files_struct *fsp,
 	const char *name, void *value, size_t size)
 {
-    DEBUG(0, ("Tracim: tracim_fgetxattr(%s, %s, %ld)\n", fsp->fsp_name->base_name, name, size));
-	// * user.DOSATTRIB : Read-Only = 0x1, Hidden = 0x2, System = 0x4, Archive = 0x20 : https://lists.samba.org/archive/samba/2015-August/193472.html
+	struct xattr_DOSATTRIB dosattrib = {0, };
 	ssize_t result = 0;
 	memset(value, 0, size);
-	// ssize_t result = SMB_VFS_NEXT_GETXATTR(handle, fsp, name, value, size);
+    DEBUG(0, ("Tracim: tracim_fgetxattr(%s, %s, %ld)\n", fsp->fsp_name->base_name, name, size));
+	if (strcmp(name, SAMBA_XATTR_DOS_ATTRIB)==0) {
+		DATA_BLOB blob;
+		blob.data = (uint8_t *)value;
+		blob.length = size;
+		// user.DOSATTRIB : Read-Only = 0x1, Hidden = 0x2, System = 0x4, Archive = 0x20 : https://lists.samba.org/archive/samba/2015-August/193472.html
+		dosattrib.version = 3;
+		dosattrib.info.info3.attrib = 0x0;
+		dosattrib.info.info3.valid_flags = 0x0;
+		// XATTR_DOSINFO_ATTRIB ( 0x00000001 ), XATTR_DOSINFO_EA_SIZE ( 0x00000002 ), XATTR_DOSINFO_SIZE ( 0x00000004 ), 
+		// XATTR_DOSINFO_ALLOC_SIZE ( 0x00000008 ), XATTR_DOSINFO_CREATE_TIME ( 0x00000010 ), XATTR_DOSINFO_CHANGE_TIME ( 0x00000020 ), XATTR_DOSINFO_ITIME ( 0x00000040 )
+		ndr_push_struct_blob(&blob, handle->conn, value, tracim_checker);
+		result = sizeof(struct xattr_DOSATTRIB);
+	}
 	return result;
 }
 /**
@@ -1896,6 +1957,7 @@ NTSTATUS tracim_create_file(struct vfs_handle_struct *handle,
 	// 	allocation_size, private_flags,
 	// 	sd, ea_list, result,
 	// 	pinfo, in_context_blobs, out_context_blobs);
+	smb_fname->st.st_ex_nlink = 1; // To force VALID_STAT to say file exists.
 	status = SMB_VFS_NEXT_CREATE_FILE(
 		handle, req, dirfsp, smb_fname,
 		access_mask, share_access,
@@ -2173,10 +2235,10 @@ static struct vfs_fn_pointers tracim_functions = {
     .pwrite_fn = tracim_pwrite,
     .unlinkat_fn = tracim_unlinkat,
 
-//    .fgetxattr_fn = tracim_fgetxattr,
-//    .fsetxattr_fn = tracim_fsetxattr,
-//    .fremovexattr_fn = tracim_fremovexattr,
-//    .flistxattr_fn = tracim_flistxattr,
+    .fgetxattr_fn = tracim_fgetxattr,
+    .fsetxattr_fn = tracim_fsetxattr,
+    .fremovexattr_fn = tracim_fremovexattr,
+    .flistxattr_fn = tracim_flistxattr,
  
     .fdopendir_fn = tracim_opendir,
     .readdir_fn = tracim_readdir,
@@ -2199,6 +2261,7 @@ static struct vfs_fn_pointers tracim_functions = {
 	.set_quota_fn = vfs_not_implemented_set_quota,
 	// .get_quota_fn = tracim_get_quota
 	.create_file_fn = tracim_create_file,
+	.renameat_fn = tracim_renameat,
 	.fcntl_fn = tracim_fcntl,
 
 	.lock_fn = tracim_lock,

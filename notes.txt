@@ -1,0 +1,40 @@
+
+tracim_mail_fetcher
+
+/tracim/backend/daemons/mail_fetcher.py
+/tracim/tools_docker/Debian_Uwsgi/supervisord_tracim.conf
+
+
+Les fonctions de FileSystemService à implementer:
+
+* def get_file_info(self, path: str, username: str) -> Dict[str, Any]: Donne les informations d'un fichier comme propriétaire, droits, groupe, type de fichier (dossier?)
+* def open_file(self, path: str, username: str, flags: int, mode: int) -> Dict[str, Any]: Ouvre un fichier qui peut être un dossier.
+* def read_file(self, handle: int, size: int) -> Dict[str, Any]: Lecture d'un fichier.
+* def unlink(self, path:str, flags:int) -> bool: Supprime un fichier. 
+* def write_file(self, handle: int, data: str, size: int, offset:int) -> Dict[str, Any]: Ecris un fichier
+* def create_file(self, path:str="", user:str="", mode=0, flags=0, attr=0, size=0, is_dir=False) -> Dict[str, Any]: Crée un fichier qui peut exister quand c'est le premier acces (Path de montage)
+* def lock_file(self, fd, len, pid, start, type:FLockType, whence:FLockWhence): Verrouille un fichier
+* def close_file(self, handle: int) -> Dict[str, Any]: Ferme un fichier
+* def open_directory(self, path: str, username: str, mask: str) -> Dict[str, Any]: Ouvre un dossier
+* def close_directory(self, handle: int) -> Dict[str, Any]: Ferme un dossier
+* def init_connection(self, service:str, user:str, mount_point:str="/") -> Dict[str, Any]: Début de connection
+* def disconnect(self, conn_id: Optional[int] = None): Fin de connection
+
+Optionnels:
+
+* def get_file_info_fd(self, fd: int, username: str) -> Dict[str, Any]: comme get_file_info() mais à partir du descripteur de fichier (fd)
+* def read_directory(self, handle: int) -> Dict[str, Any]: Donne la prochaine entrée d'un dosier. (En fait itere sur la liste des fichiers du dossier)
+
+Juillet:
+2-3 : Etude install
+4   : try load tracim.so
+7   : Connect to the VFS
+8   : State for demo
+9/2 : Integrate samba_vfs_service in Tracim
+10  : Improve connect Ok. ls Ko but better.
+12  : Try
+15  : "ls" seam work but without the correct list.
+16  : "ls" give what expected. Can go in directory but fail in subdirectory. Start integrate real Tracim API
+17  : Less in hard, more functions : try add create
+18  : "get test.txt"  run Ok
+21  : smbclient work well. Error in GUI.
