@@ -272,19 +272,17 @@ class FileSystemService:
         data = content[position:position + size]
         file_info.position += len(data)
         
-        # This is where you'd call your actual database library
-        # TODO
-        
         return {
             "success": True,
             "data": data,
             "size": len(data)
         }
 
-    def unlink(self, path:str, flags:int) -> bool:
+    def unlink(self, path:str, fd:int, flags:int) -> bool:
         """
-        TODO
+        TODO : recursive for directories
         """
+        # if flags & AT_REMOVEDIR: # AT_REMOVEDIR=0x200 cf fcntl.h
         # del self._files[path]
         # Remove all opened files : Unix way is to wait they close there fd?
         # foodict = {k: v for k, v in self._file_handles.items() if v.path!=path}
@@ -481,6 +479,20 @@ class FileSystemService:
         dir_info = self.dir_handles.pop(handle)
         logger.info(self, f"Closed directory {dir_info.path}")
         return {"success":True, "handle":handle}
+
+    def xattr_file(self, user, path, name, value=None):
+        """
+        If value is None: Get xattr value. Else set.
+        """
+        finfo = self._files.get(path, None)
+        if finfo is None:
+            raise FileSystemException("No such file {path}")
+        xattrs = finfo.get("xattr", {})
+        if value is None:
+            return {"value":xattrs.get(name, "")}
+        else:
+            xattrs[name] = value
+            return True
 
     def init_connection(self, service:str, user:str, mount_point:str="/") -> Dict[str, Any]:
         """Initialize a new connection."""

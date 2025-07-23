@@ -43,619 +43,46 @@ extern NTSTATUS open_fake_file(struct smb_request *req, connection_struct *conn,
 				const struct smb_filename *smb_fname,
 				uint32_t access_mask,
 				files_struct **result);
+extern enum ndr_err_code ndr_push_nbt_name(struct ndr_push *ndr, ndr_flags_type ndr_flags, const struct nbt_name *r);
+char *BASE64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
-/**
- * @brief Copy of create_file_unixpath from open.c. : Wrapper around open_file_ntcreate and open_directory
- * 
- */
-static NTSTATUS create_file_unixpath(connection_struct *conn,
-				     struct smb_request *req,
-				     struct files_struct *dirfsp,
-				     struct smb_filename *smb_fname,
-				     uint32_t access_mask,
-				     uint32_t share_access,
-				     uint32_t create_disposition,
-				     uint32_t create_options,
-				     uint32_t file_attributes,
-				     uint32_t oplock_request,
-				     const struct smb2_lease *lease,
-				     uint64_t allocation_size,
-				     uint32_t private_flags,
-				     struct security_descriptor *sd,
-				     struct ea_list *ea_list,
-
-				     files_struct **result,
-				     int *pinfo)
-{
-	struct smb2_lease none_lease;
-	int info = FILE_WAS_OPENED;
-	files_struct *base_fsp = NULL;
-	files_struct *fsp = NULL;
-	bool free_fsp_on_error = false;
-	NTSTATUS status;
-	int ret;
-	struct smb_filename *parent_dir_fname = NULL;
-	struct smb_filename *smb_fname_atname = NULL;
-
-	DBG_DEBUG("access_mask = 0x%"PRIx32" "
-		  "file_attributes = 0x%"PRIx32" "
-		  "share_access = 0x%"PRIx32" "
-		  "create_disposition = 0x%"PRIx32" "
-		  "create_options = 0x%"PRIx32" "
-		  "oplock_request = 0x%"PRIx32" "
-		  "private_flags = 0x%"PRIx32" "
-		  "ea_list = %p, "
-		  "sd = %p, "
-		  "fname = %s\n",
-		  access_mask,
-		  file_attributes,
-		  share_access,
-		  create_disposition,
-		  create_options,
-		  oplock_request,
-		  private_flags,
-		  ea_list,
-		  sd,
-		  smb_fname_str_dbg(smb_fname));
-
-	if (create_options & FILE_OPEN_BY_FILE_ID) {
-		status = NT_STATUS_NOT_SUPPORTED;
-		goto fail;
-	}
-
-	if (create_options & NTCREATEX_OPTIONS_INVALID_PARAM_MASK) {
-		status = NT_STATUS_INVALID_PARAMETER;
-		goto fail;
-	}
-
-	if (!(create_options & FILE_OPEN_REPARSE_POINT) &&
-	    (smb_fname->fsp != NULL) && /* new files don't have an fsp */
-	    VALID_STAT(smb_fname->fsp->fsp_name->st))
-	{
-		mode_t type = (smb_fname->fsp->fsp_name->st.st_ex_mode &
-			       S_IFMT);
-
-		switch (type) {
-		case S_IFREG:
-			FALL_THROUGH;
-		case S_IFDIR:
-			break;
-		case S_IFLNK:
-			/*
-			 * We should never get this far with a symlink
-			 * "as such". Report as not existing.
-			 */
-			status = NT_STATUS_OBJECT_NAME_NOT_FOUND;
-			goto fail;
-		default:
-			status = NT_STATUS_IO_REPARSE_TAG_NOT_HANDLED;
-			goto fail;
-		}
-	}
-
-	if (req == NULL) {
-		oplock_request |= INTERNAL_OPEN_ONLY;
-	}
-
-	if (lease != NULL) {
-		uint16_t epoch = lease->lease_epoch;
-		uint16_t version = lease->lease_version;
-
-		if (req == NULL) {
-			DBG_WARNING("Got lease on internal open\n");
-			status = NT_STATUS_INTERNAL_ERROR;
-			goto fail;
-		}
-		DEBUG(0, ("Tracim: create_file_unixpath() - TODO : Not implemented part : lease_match.\n"));
-		// Try to ignore that part
-		/* status = lease_match(conn,
-				req,
-				&lease->lease_key,
-				conn->connectpath,
-				smb_fname,
-				&version,
-				&epoch);
-		if (NT_STATUS_EQUAL(status, NT_STATUS_OPLOCK_NOT_GRANTED)) {
-			// Dynamic share file. No leases and update epoch...
-			none_lease = *lease;
-			none_lease.lease_state = SMB2_LEASE_NONE;
-			none_lease.lease_epoch = epoch;
-			none_lease.lease_version = version;
-			lease = &none_lease;
-		} else if (!NT_STATUS_IS_OK(status)) {
-			goto fail;
-		} */
-	}
-
-	if ((conn->fs_capabilities & FILE_NAMED_STREAMS)
-	    && (access_mask & DELETE_ACCESS)
-	    && !is_named_stream(smb_fname)) {
-		DEBUG(0, ("Tracim: create_file_unixpath() - TODO : Not implemented part : open_streams_for_delete.\n"));
-		/* // We can't open a file with DELETE access if any of the
-		// streams is open without FILE_SHARE_DELETE
-		status = open_streams_for_delete(conn, smb_fname);
-		if (!NT_STATUS_IS_OK(status)) {
-			goto fail;
-		} */
-	}
-
-	if (access_mask & SEC_FLAG_SYSTEM_SECURITY) {
-		bool ok;
-
-		ok = security_token_has_privilege(get_current_nttok(conn),
-						  SEC_PRIV_SECURITY);
-		if (!ok) {
-			DBG_DEBUG("open on %s failed - "
-				"SEC_FLAG_SYSTEM_SECURITY denied.\n",
-				smb_fname_str_dbg(smb_fname));
-			status = NT_STATUS_PRIVILEGE_NOT_HELD;
-			goto fail;
-		}
-
-		if (conn_using_smb2(conn->sconn) &&
-		    (access_mask == SEC_FLAG_SYSTEM_SECURITY))
-		{
-			/*
-			 * No other bits set. Windows SMB2 refuses this.
-			 * See smbtorture3 SMB2-SACL test.
-			 *
-			 * Note this is an SMB2-only behavior,
-			 * smbtorture3 SMB1-SYSTEM-SECURITY already tests
-			 * that SMB1 allows this.
-			 */
-			status = NT_STATUS_ACCESS_DENIED;
-			goto fail;
-		}
-	}
-
-	/*
-	 * Files or directories can't be opened DELETE_ON_CLOSE without
-	 * delete access.
-	 * BUG: https://bugzilla.samba.org/show_bug.cgi?id=13358
-	 */
-	if ((create_options & FILE_DELETE_ON_CLOSE) &&
-	    ((access_mask & DELETE_ACCESS) == 0)) {
-		status = NT_STATUS_INVALID_PARAMETER;
-		goto fail;
-	}
-
-	if ((conn->fs_capabilities & FILE_NAMED_STREAMS)
-	    && is_named_stream(smb_fname))
-	{
-		uint32_t base_create_disposition;
-		struct smb_filename *smb_fname_base = NULL;
-		uint32_t base_privflags;
-
-		if (create_options & FILE_DIRECTORY_FILE) {
-			DBG_DEBUG("Can't open a stream as directory\n");
-			status = NT_STATUS_NOT_A_DIRECTORY;
-			goto fail;
-		}
-
-		switch (create_disposition) {
-		case FILE_OPEN:
-			base_create_disposition = FILE_OPEN;
-			break;
-		default:
-			base_create_disposition = FILE_OPEN_IF;
+void base64_encode(const char *in, const unsigned long in_len, char *out) {
+	int in_index = 0;
+	int out_index = 0;
+	while (in_index < in_len) {
+		// process group of 24 bit
+		// first 6-bit
+		out[out_index++] = BASE64[ (in[in_index] & 0xFC) >> 2 ];
+		if ((in_index + 1) == in_len) {
+			// padding case n.1
+			// Remaining bits to process are the right-most 2 bit of on the
+			// last byte of input. we also need to add two bytes of padding
+			out[out_index++] = BASE64[ ((in[in_index] & 0x3) << 4) ];
+			out[out_index++] = '=';
+			out[out_index++] = '=';
 			break;
 		}
-
-		smb_fname_base = cp_smb_filename_nostream(
-			talloc_tos(), smb_fname);
-
-		if (smb_fname_base == NULL) {
-			status = NT_STATUS_NO_MEMORY;
-			goto fail;
+		// second 6-bit
+		out[out_index++] = BASE64[ ((in[in_index] & 0x3) << 4) | ((in[in_index+1] & 0xF0) >> 4) ];
+		if ((in_index + 2) == in_len) {
+			// padding case n.2
+			//
+			// Remaining bits to process are the right most 4 bit on the
+			// last byte of input. We also need to add a single byte of
+			// padding.
+			out[out_index++] = BASE64[ ((in[in_index + 1] & 0xF) << 2) ];
+			out[out_index++] = '=';
+			break;
 		}
-
-		/*
-		 * We may be creating the basefile as part of creating the
-		 * stream, so it's legal if the basefile doesn't exist at this
-		 * point, the create_file_unixpath() below will create it. But
-		 * if the basefile exists we want a handle so we can fstat() it.
-		 */
-
-		ret = vfs_stat(conn, smb_fname_base);
-		if (ret == -1 && errno != ENOENT) {
-			status = map_nt_error_from_unix(errno);
-			TALLOC_FREE(smb_fname_base);
-			goto fail;
-		}
-		if (ret == 0) {
-			status = openat_pathref_fsp(conn->cwd_fsp,
-						    smb_fname_base);
-			if (!NT_STATUS_IS_OK(status)) {
-				DBG_ERR("open_smb_fname_fsp [%s] failed: %s\n",
-					smb_fname_str_dbg(smb_fname_base),
-					nt_errstr(status));
-				TALLOC_FREE(smb_fname_base);
-				goto fail;
-			}
-
-			DEBUG(0, ("Tracim: create_file_unixpath() - TODO : Not implemented part : check_base_file_access.\n"));
-			/*
-			// * https://bugzilla.samba.org/show_bug.cgi?id=10229
-			// * We need to check if the requested access mask
-			// * could be used to open the underlying file (if
-			// * it existed), as we're passing in zero for the
-			// * access mask to the base filename.
-			status = check_base_file_access(smb_fname_base->fsp,
-							access_mask);
-
-			if (!NT_STATUS_IS_OK(status)) {
-				DEBUG(10, ("Permission check "
-					"for base %s failed: "
-					"%s\n", smb_fname->base_name,
-					nt_errstr(status)));
-				TALLOC_FREE(smb_fname_base);
-				goto fail;
-			}*/
-		}
-
-		base_privflags = NTCREATEX_FLAG_STREAM_BASEOPEN;
-
-		/* Open the base file. */
-		status = create_file_unixpath(conn,
-					      NULL,
-					      dirfsp,
-					      smb_fname_base,
-					      0,
-					      FILE_SHARE_READ
-					      | FILE_SHARE_WRITE
-					      | FILE_SHARE_DELETE,
-					      base_create_disposition,
-					      0,
-					      0,
-					      0,
-					      NULL,
-					      0,
-					      base_privflags,
-					      NULL,
-					      NULL,
-					      &base_fsp,
-					      NULL);
-		TALLOC_FREE(smb_fname_base);
-
-		if (!NT_STATUS_IS_OK(status)) {
-			DEBUG(10, ("create_file_unixpath for base %s failed: "
-				   "%s\n", smb_fname->base_name,
-				   nt_errstr(status)));
-			goto fail;
-		}
+		// third 6-bit
+		out[out_index++] = BASE64[ ((in[in_index + 1] & 0xF) << 2) | ((in[in_index + 2] & 0xC0) >> 6) ];
+		// fourth 6-bit
+		out[out_index++] = BASE64[ in[in_index + 2] & 0x3F ];
+		in_index += 3;
 	}
-
-	if (smb_fname->fsp != NULL) {
-
-		fsp = smb_fname->fsp;
-
-		/*
-		 * We're about to use smb_fname->fsp for the fresh open.
-		 *
-		 * Every fsp passed in via smb_fname->fsp already
-		 * holds a fsp->fsp_name. If it is already this
-		 * fsp->fsp_name that we got passed in as our input
-		 * argument smb_fname, these two are assumed to have
-		 * the same lifetime: Every fsp hangs of "conn", and
-		 * fsp->fsp_name is its talloc child.
-		 */
-
-		if (smb_fname != smb_fname->fsp->fsp_name) {
-			/*
-			 * "smb_fname" is temporary in this case, but
-			 * the destructor of smb_fname would also tear
-			 * down the fsp we're about to use. Unlink
-			 * them from each other.
-			 */
-			smb_fname_fsp_unlink(smb_fname);
-
-			/*
-			 * "fsp" is ours now
-			 */
-			free_fsp_on_error = true;
-		}
-
-		status = fsp_bind_smb(fsp, req);
-		if (!NT_STATUS_IS_OK(status)) {
-			goto fail;
-		}
-
-		if (fsp_is_alternate_stream(fsp)) {
-			struct files_struct *tmp_base_fsp = fsp->base_fsp;
-
-			fsp_set_base_fsp(fsp, NULL);
-
-			fd_close(tmp_base_fsp);
-			file_free(NULL, tmp_base_fsp);
-		}
-	} else {
-		/*
-		 * No fsp passed in that we can use, create one
-		 */
-		status = file_new(req, conn, &fsp);
-		if(!NT_STATUS_IS_OK(status)) {
-			goto fail;
-		}
-		free_fsp_on_error = true;
-
-		status = fsp_set_smb_fname(fsp, smb_fname);
-		if (!NT_STATUS_IS_OK(status)) {
-			goto fail;
-		}
-	}
-
-	SMB_ASSERT(fsp->fsp_name->fsp != NULL);
-	SMB_ASSERT(fsp->fsp_name->fsp == fsp);
-
-	if (base_fsp) {
-		/*
-		 * We're opening the stream element of a
-		 * base_fsp we already opened. Set up the
-		 * base_fsp pointer.
-		 */
-		fsp_set_base_fsp(fsp, base_fsp);
-	}
-
-	if (dirfsp != NULL) {
-		status = SMB_VFS_PARENT_PATHNAME(
-			conn,
-			talloc_tos(),
-			smb_fname,
-			&parent_dir_fname,
-			&smb_fname_atname);
-		if (!NT_STATUS_IS_OK(status)) {
-			goto fail;
-		}
-	} else {
-		/*
-		 * Get a pathref on the parent. We can re-use this for
-		 * multiple calls to check parent ACLs etc. to avoid
-		 * pathname calls.
-		 */
-		status = parent_pathref(talloc_tos(),
-					conn->cwd_fsp,
-					smb_fname,
-					&parent_dir_fname,
-					&smb_fname_atname);
-		if (!NT_STATUS_IS_OK(status)) {
-			goto fail;
-		}
-
-		dirfsp = parent_dir_fname->fsp;
-		status = fsp_set_smb_fname(dirfsp, parent_dir_fname);
-		if (!NT_STATUS_IS_OK(status)) {
-			goto fail;
-		}
-	}
-
-	/*
-	 * If it's a request for a directory open, deal with it separately.
-	 */
-
-	if (create_options & FILE_DIRECTORY_FILE) {
-
-		if (create_options & FILE_NON_DIRECTORY_FILE) {
-			status = NT_STATUS_INVALID_PARAMETER;
-			goto fail;
-		}
-
-		/* Can't open a temp directory. IFS kit test. */
-		if (!(file_attributes & FILE_FLAG_POSIX_SEMANTICS) &&
-		     (file_attributes & FILE_ATTRIBUTE_TEMPORARY)) {
-			status = NT_STATUS_INVALID_PARAMETER;
-			goto fail;
-		}
-
-		DEBUG(0, ("Tracim: create_file_unixpath() - TODO : Not implemented part : open_directory.\n"));
-		/*
-		 // * We will get a create directory here if the Win32
-		 // * app specified a security descriptor in the
-		 // * CreateDirectory() call.		 
-		oplock_request = 0;
-		status = open_directory(conn,
-					req,
-					access_mask,
-					share_access,
-					create_disposition,
-					create_options,
-					file_attributes,
-					dirfsp->fsp_name,
-					smb_fname_atname,
-					&info,
-					fsp);
-		*/
-	} else {
-
-		/*
-		 * Ordinary file case.
-		 */
-
-		if (allocation_size) {
-			fsp->initial_allocation_size = smb_roundup(fsp->conn,
-							allocation_size);
-		}
-		/*
-		status = open_file_ntcreate(conn,
-					    req,
-					    access_mask,
-					    share_access,
-					    create_disposition,
-					    create_options,
-					    file_attributes,
-					    oplock_request,
-					    lease,
-					    private_flags,
-					    dirfsp->fsp_name,
-					    smb_fname_atname,
-					    &info,
-					    fsp);
-		if (NT_STATUS_EQUAL(status, NT_STATUS_FILE_IS_A_DIRECTORY)) {
-
-			// A stream open never opens a directory
-			if (base_fsp) {
-				status = NT_STATUS_FILE_IS_A_DIRECTORY;
-				goto fail;
-			}
-
-			// * Fail the open if it was explicitly a non-directory
-			// * file.
-			if (create_options & FILE_NON_DIRECTORY_FILE) {
-				status = NT_STATUS_FILE_IS_A_DIRECTORY;
-				goto fail;
-			}
-			DEBUG(0, ("Tracim: create_file_unixpath() - TODO : Not implemented part : open_directory2.\n"));
-			oplock_request = 0;
-			/* status = open_directory(conn,
-						req,
-						access_mask,
-						share_access,
-						create_disposition,
-						create_options,
-						file_attributes,
-						dirfsp->fsp_name,
-						smb_fname_atname,
-						&info,
-						fsp);
-			* /
-		}
-		*/
-	}
-
-	if (!NT_STATUS_IS_OK(status)) {
-		goto fail;
-	}
-
-	fsp->fsp_flags.is_fsa = true;
-
-	if ((ea_list != NULL) &&
-	    ((info == FILE_WAS_CREATED) || (info == FILE_WAS_OVERWRITTEN))) {
-		status = set_ea(conn, fsp, ea_list);
-		if (!NT_STATUS_IS_OK(status)) {
-			goto fail;
-		}
-	}
-
-	if (!fsp->fsp_flags.is_directory &&
-	    S_ISDIR(fsp->fsp_name->st.st_ex_mode))
-	{
-		status = NT_STATUS_ACCESS_DENIED;
-		goto fail;
-	}
-
-	/* Save the requested allocation size. */
-	if ((info == FILE_WAS_CREATED) || (info == FILE_WAS_OVERWRITTEN)) {
-		if ((allocation_size > (uint64_t)fsp->fsp_name->st.st_ex_size)
-		    && !(fsp->fsp_flags.is_directory))
-		{
-			fsp->initial_allocation_size = smb_roundup(
-				fsp->conn, allocation_size);
-			if (vfs_allocate_file_space(
-				    fsp, fsp->initial_allocation_size) == -1) {
-				status = NT_STATUS_DISK_FULL;
-				goto fail;
-			}
-		} else {
-			fsp->initial_allocation_size = smb_roundup(
-				fsp->conn, (uint64_t)fsp->fsp_name->st.st_ex_size);
-		}
-	} else {
-		fsp->initial_allocation_size = 0;
-	}
-
-	if ((info == FILE_WAS_CREATED) &&
-	    lp_nt_acl_support(SNUM(conn)) &&
-	    !fsp_is_alternate_stream(fsp)) {
-		if (sd != NULL) {
-			/*
-			 * According to the MS documentation, the only time the security
-			 * descriptor is applied to the opened file is iff we *created* the
-			 * file; an existing file stays the same.
-			 *
-			 * Also, it seems (from observation) that you can open the file with
-			 * any access mask but you can still write the sd. We need to override
-			 * the granted access before we call set_sd
-			 * Patch for bug #2242 from Tom Lackemann <cessnatomny@yahoo.com>.
-			 */
-
-			uint32_t sec_info_sent;
-			uint32_t saved_access_mask = fsp->access_mask;
-
-			sec_info_sent = get_sec_info(sd);
-
-			fsp->access_mask = FILE_GENERIC_ALL;
-
-			if (sec_info_sent & (SECINFO_OWNER|
-						SECINFO_GROUP|
-						SECINFO_DACL|
-						SECINFO_SACL)) {
-				status = set_sd(fsp, sd, sec_info_sent);
-			}
-
-			fsp->access_mask = saved_access_mask;
-
-			if (!NT_STATUS_IS_OK(status)) {
-				goto fail;
-			}
-		} else if (lp_inherit_acls(SNUM(conn))) {
-			DEBUG(0, ("Tracim: create_file_unixpath() - TODO : Not implemented part : inherit_new_acl.\n"));
-			/* // Inherit from parent. Errors here are not fatal.
-			status = inherit_new_acl(dirfsp, fsp);
-			if (!NT_STATUS_IS_OK(status)) {
-				DEBUG(10,("inherit_new_acl: failed for %s with %s\n",
-					fsp_str_dbg(fsp),
-					nt_errstr(status) ));
-			} */
-		}
-	}
-
-	if ((conn->fs_capabilities & FILE_FILE_COMPRESSION)
-	 && (create_options & FILE_NO_COMPRESSION)
-	 && (info == FILE_WAS_CREATED)) {
-		status = SMB_VFS_SET_COMPRESSION(conn, fsp, fsp,
-						 COMPRESSION_FORMAT_NONE);
-		if (!NT_STATUS_IS_OK(status)) {
-			DEBUG(1, ("failed to disable compression: %s\n",
-				  nt_errstr(status)));
-		}
-	}
-
-	DEBUG(10, ("create_file_unixpath: info=%d\n", info));
-
-	*result = fsp;
-	if (pinfo != NULL) {
-		*pinfo = info;
-	}
-
-	smb_fname->st = fsp->fsp_name->st;
-
-	TALLOC_FREE(parent_dir_fname);
-
-	return NT_STATUS_OK;
-
- fail:
-	DEBUG(10, ("create_file_unixpath: %s\n", nt_errstr(status)));
-
-	if (fsp != NULL) {
-		/*
-		 * The close_file below will close
-		 * fsp->base_fsp.
-		 */
-		base_fsp = NULL;
-		close_file_smb(req, fsp, ERROR_CLOSE);
-		if (free_fsp_on_error) {
-			file_free(req, fsp);
-			fsp = NULL;
-		}
-	}
-	if (base_fsp != NULL) {
-		close_file_free(req, &base_fsp, ERROR_CLOSE);
-	}
-
-	TALLOC_FREE(parent_dir_fname);
-
-	return status;
+	out[out_index] = '\0';
+	return;
 }
-
 /* VFS module data structure */
 struct tracim_data {
     int socket_fd;
@@ -1387,23 +814,51 @@ enum ndr_err_code tracim_checker(struct ndr_push * s, ndr_flags_type ndr_flags, 
 ssize_t tracim_fgetxattr(struct vfs_handle_struct *handle, struct files_struct *fsp,
 	const char *name, void *value, size_t size)
 {
-	struct xattr_DOSATTRIB dosattrib = {0, };
-	ssize_t result = 0;
-	memset(value, 0, size);
+	struct xattr_DOSATTRIB dosattrib;
+	memset(&dosattrib, 0, sizeof(dosattrib));
+	ssize_t result = size;
     DEBUG(0, ("Tracim: tracim_fgetxattr(%s, %s, %ld)\n", fsp->fsp_name->base_name, name, size));
-	if (strcmp(name, SAMBA_XATTR_DOS_ATTRIB)==0) {
+	if (strcmp(name, SAMBA_XATTR_DOS_ATTRIB)==0) { // See set_ea_dos_attribute()
+    	DEBUG(0, ("Tracim: tracim_fgetxattr(%s, %s, %ld) : SAMBA_XATTR_DOS_ATTRIB\n", fsp->fsp_name->base_name, name, size));
+		uint32_t dosmode = FILE_ATTRIBUTE_NORMAL;
+		// dosmode &= ~FILE_ATTRIBUTE_OFFLINE;
 		DATA_BLOB blob;
 		blob.data = (uint8_t *)value;
 		blob.length = size;
 		// user.DOSATTRIB : Read-Only = 0x1, Hidden = 0x2, System = 0x4, Archive = 0x20 : https://lists.samba.org/archive/samba/2015-August/193472.html
-		dosattrib.version = 3;
-		dosattrib.info.info3.attrib = 0x0;
-		dosattrib.info.info3.valid_flags = 0x0;
+		dosattrib.version = 5;
+		dosattrib.info.info5.attrib = dosmode;
 		// XATTR_DOSINFO_ATTRIB ( 0x00000001 ), XATTR_DOSINFO_EA_SIZE ( 0x00000002 ), XATTR_DOSINFO_SIZE ( 0x00000004 ), 
 		// XATTR_DOSINFO_ALLOC_SIZE ( 0x00000008 ), XATTR_DOSINFO_CREATE_TIME ( 0x00000010 ), XATTR_DOSINFO_CHANGE_TIME ( 0x00000020 ), XATTR_DOSINFO_ITIME ( 0x00000040 )
-		ndr_push_struct_blob(&blob, handle->conn, value, tracim_checker);
-		result = sizeof(struct xattr_DOSATTRIB);
+		dosattrib.info.info5.valid_flags = XATTR_DOSINFO_ATTRIB|XATTR_DOSINFO_CREATE_TIME;
+		time_t rawtime = time(NULL);
+		struct timespec ts = time_t_to_full_timespec(rawtime);
+		dosattrib.info.info5.create_time = full_timespec_to_nt_time(&ts);
+		enum ndr_err_code ndr_err = ndr_push_struct_blob(&blob, talloc_tos(), &dosattrib, 
+			(ndr_push_flags_fn_t)ndr_push_xattr_DOSATTRIB);
+		if (!NDR_ERR_CODE_IS_SUCCESS(ndr_err)) {
+			DEBUG(0, ("tracim_fgetxattr: ndr_push_struct_blob failed: %s\n",ndr_errstr(ndr_err)));
+			return -1;
+		}
+		if (blob.data == NULL || blob.length == 0) {
+			DEBUG(0, ("tracim_fgetxattr: no blob data: %p / %ld\n", blob.data, blob.length));
+			return -1;
+		}
+		if (size < blob.length) {
+			DEBUG(0, ("tracim_fgetxattr: not enougth space: %ld < %ld\n", size, blob.length));
+            data_blob_free(&blob);
+            errno = ERANGE;
+            return -1;
+        }
+        memcpy(value, blob.data, blob.length);
+		result = blob.length; // sizeof(struct xattr_DOSATTRIB);
+	} else {
+    	DEBUG(0, ("Tracim: tracim_fgetxattr(%s, %s, %ld) : unimplemented\n", fsp->fsp_name->base_name, name, size));
 	}
+	char * encoded = (char*)malloc(result*2+1);
+	base64_encode(value, result, encoded);
+    DEBUG(0, ("Tracim: tracim_fgetxattr(%s, %s, %ld) : %ld :%s\n", fsp->fsp_name->base_name, name, size, result, encoded));
+	free(encoded);
 	return result;
 }
 /**
@@ -1425,7 +880,40 @@ ssize_t tracim_flistxattr(struct vfs_handle_struct *handle, struct files_struct 
 int tracim_fsetxattr(struct vfs_handle_struct *handle, struct files_struct *fsp,
 	const char *name, const void *value, size_t size, int flags)
 {
-    DEBUG(0, ("Tracim: tracim_fsetxattr(%s, %s=%s) : TODO\n", fsp->fsp_name->base_name, name, (char*)value));
+	int result = -1;
+    DEBUG(0, ("Tracim: tracim_fsetxattr(%s, %s=%s)\n", fsp->fsp_name->base_name, name, (char*)value));
+    struct tracim_data *data = get_tracim_data(handle);
+    if (!data) {
+        DEBUG(0, ("tracim_fsetxattr: Failed to get VFS tracim data\n"));
+        return result;
+    }
+	char * encoded = (char*)malloc(size*2+1);
+	base64_encode(value, size, encoded);
+    json_t *request = json_object();
+    json_object_set_new(request, "op", json_string("xattr"));
+    json_object_set_new(request, "path", json_string(fsp->fsp_name->base_name));
+    json_object_set_new(request, "name", json_string(name));
+    json_object_set_new(request, "value", json_string(encoded));
+    json_object_set_new(request, "user", json_string(data->user));
+    json_t *response = send_request(data, request);
+    json_decref(request);
+	free(encoded);
+	if (!response) {
+		DEBUG(0, ("tracim_fsetxattr: Failed to get response\n"));
+		return result;
+	}
+    json_t *success_obj = json_object_get(response, "success");
+	if (!success_obj) {
+		if (json_is_true(success_obj)) {
+			result = 0;
+		} else {
+			success_obj = json_object_get(response, "error");
+			DEBUG(0, ("Tracim: tracim_fsetxattr failed: %s\n", json_string_value(success_obj)));
+		}
+	} else {
+		DEBUG(0, ("Tracim: tracim_fsetxattr failed\n"));
+	}
+    json_decref(response);
 	return 0;
 }
 int tracim_fremovexattr(struct vfs_handle_struct *handle, struct files_struct *fsp, const char *name)
@@ -1490,7 +978,7 @@ static ssize_t tracim_pread(vfs_handle_struct *handle, files_struct *fsp,
 static ssize_t tracim_pwrite(vfs_handle_struct *handle, files_struct *fsp,
                              const void *data_buf, size_t n, off_t offset)
 {
-	DEBUG(0, ("Tracim: tracim_pwrite() : TODO.\n"));
+	DEBUG(0, ("Tracim: tracim_pwrite().\n"));
     struct tracim_data *data = get_tracim_data(handle);
     json_t *request, *response, *success_obj, *bytes_obj;
     ssize_t result = -1;
@@ -1538,7 +1026,7 @@ static off_t tracim_lseek(vfs_handle_struct *handle, files_struct *fsp, off_t of
 {
     struct file_context *ctx = (struct file_context *)fsp->vfs_extension;
     off_t result;
-    DEBUG(0, ("Tracim: tracim_lseek() : TODO\n"));
+    DEBUG(0, ("Tracim: tracim_lseek()\n"));
 
     /* if (!ctx || ctx->is_directory) {
         errno = EISDIR;
@@ -1594,188 +1082,6 @@ int tracim_get_quota (struct vfs_handle_struct *handle,
 	qt->curinodes = 1; // Current used inodes.
 
 }
-/**
- * @brief Copy of open.c : create_file_default()
- * 
- */
-NTSTATUS create_file_tracim(connection_struct *conn,
-			     struct smb_request *req,
-			     struct files_struct *dirfsp,
-			     struct smb_filename *smb_fname,
-			     uint32_t access_mask,
-			     uint32_t share_access,
-			     uint32_t create_disposition,
-			     uint32_t create_options,
-			     uint32_t file_attributes,
-			     uint32_t oplock_request,
-			     const struct smb2_lease *lease,
-			     uint64_t allocation_size,
-			     uint32_t private_flags,
-			     struct security_descriptor *sd,
-			     struct ea_list *ea_list,
-			     files_struct **result,
-			     int *pinfo,
-			     const struct smb2_create_blobs *in_context_blobs,
-			     struct smb2_create_blobs *out_context_blobs)
-{
-	int info = FILE_WAS_OPENED;
-	files_struct *fsp = NULL;
-	NTSTATUS status;
-	bool stream_name = false;
-	struct smb2_create_blob *posx = NULL;
-
-    	DEBUG(0, ("tracim_create_file: access_mask = 0x%" PRIu32
-		  " file_attributes = 0x%" PRIu32
-		  " share_access = 0x%" PRIu32
-		  " create_disposition = 0x%" PRIu32
-		  " create_options = 0x%" PRIu32
-		  " oplock_request = 0x%" PRIu32
-		  " private_flags = 0x%" PRIu32
-		  " ea_list = %p, sd = %p, fname = %s\n",
-		  access_mask,
-		  file_attributes,
-		  share_access,
-		  create_disposition,
-		  create_options,
-		  oplock_request,
-		  private_flags,
-		  ea_list,
-		  sd,
-		  smb_fname_str_dbg(smb_fname)));
-
-	if (req != NULL) {
-    	DEBUG(0, ("tracim_create_file() : get_deferred_open_message_state\n"));
-		/*
-		 * Remember the absolute time of the original request
-		 * with this mid. We'll use it later to see if this
-		 * has timed out.
-		 */
-		// segfault : get_deferred_open_message_state(req, &req->request_time, NULL);
-	}
-
-	/*
-	 * Check to see if this is a mac fork of some kind.
-	 */
-	DEBUG(0, ("tracim_create_file() : is_ntfs_stream_smb_fname\n"));
-	stream_name = is_ntfs_stream_smb_fname(smb_fname);
-	if (stream_name) {
-		DEBUG(0, ("tracim_create_file() : stream_name\n"));
-		enum FAKE_FILE_TYPE fake_file_type = is_fake_file(smb_fname);
-		if (req != NULL && fake_file_type != FAKE_FILE_TYPE_NONE) {
-			/*
-			 * Here we go! support for changing the disk quotas
-			 * --metze
-			 *
-			 * We need to fake up to open this MAGIC QUOTA file
-			 * and return a valid FID.
-			 *
-			 * w2k close this file directly after opening xp
-			 * also tries a QUERY_FILE_INFO on the file and then
-			 * close it
-			 */
-			status = open_fake_file(req, conn, req->vuid,
-						fake_file_type, smb_fname,
-						access_mask, &fsp);
-			if (!NT_STATUS_IS_OK(status)) {
-				goto fail;
-			}
-
-			ZERO_STRUCT(smb_fname->st);
-			goto done;
-		}
-		if (!(conn->fs_capabilities & FILE_NAMED_STREAMS)) {
-			status = NT_STATUS_OBJECT_NAME_INVALID;
-			goto fail;
-		}
-	}
-
-	DEBUG(0, ("tracim_create_file() : is_ntfs_default_stream_smb_fname\n"));
-	if (is_ntfs_default_stream_smb_fname(smb_fname)) {
-		DEBUG(0, ("tracim_create_file() : is_ntfs_stream_smb_fname\n"));
-		int ret;
-		/* We have to handle this error here. */
-		if (create_options & FILE_DIRECTORY_FILE) {
-			status = NT_STATUS_NOT_A_DIRECTORY;
-			goto fail;
-		}
-		ret = vfs_stat(conn, smb_fname);
-		if (ret == 0 && VALID_STAT_OF_DIR(smb_fname->st)) {
-			status = NT_STATUS_FILE_IS_A_DIRECTORY;
-			goto fail;
-		}
-	}
-
-	DEBUG(0, ("tracim_create_file() : smb2_create_blob_find\n"));
-	posx = smb2_create_blob_find(in_context_blobs, SMB2_CREATE_TAG_POSIX);
-	if (posx != NULL) {
-		DEBUG(0, ("tracim_create_file() : posx != NULL\n"));
-		uint32_t wire_mode_bits = 0;
-		mode_t mode_bits = 0;
-		SMB_STRUCT_STAT sbuf = { 0 };
-		enum perm_type ptype =
-			(create_options & FILE_DIRECTORY_FILE) ?
-			PERM_NEW_DIR : PERM_NEW_FILE;
-
-		if (posx->data.length != 4) {
-			status = NT_STATUS_INVALID_PARAMETER;
-			goto fail;
-		}
-
-		wire_mode_bits = IVAL(posx->data.data, 0);
-		status = unix_perms_from_wire(
-			conn, &sbuf, wire_mode_bits, ptype, &mode_bits);
-		if (!NT_STATUS_IS_OK(status)) {
-			goto fail;
-		}
-		/*
-		 * Remove type info from mode, leaving only the
-		 * permissions and setuid/gid bits.
-		 */
-		mode_bits &= ~S_IFMT;
-		file_attributes = (FILE_FLAG_POSIX_SEMANTICS | mode_bits);
-	}
-
-	DEBUG(0, ("tracim_create_file() : create_file_unixpath\n"));
-	status = create_file_unixpath(conn,
-				      req,
-				      dirfsp,
-				      smb_fname,
-				      access_mask,
-				      share_access,
-				      create_disposition,
-				      create_options,
-				      file_attributes,
-				      oplock_request,
-				      lease,
-				      allocation_size,
-				      private_flags,
-				      sd,
-				      ea_list,
-				      &fsp,
-				      &info);
-	if (!NT_STATUS_IS_OK(status)) {
-		goto fail;
-	}
-
- done:
-	DEBUG(10, ("create_file: info=%d\n", info));
-
-	*result = fsp;
-	if (pinfo != NULL) {
-		*pinfo = info;
-	}
-	return NT_STATUS_OK;
-
- fail:
-	DEBUG(10, ("create_file: %s\n", nt_errstr(status)));
-
-	if (fsp != NULL) {
-		close_file_free(req, &fsp, ERROR_CLOSE);
-	}
-	return status;
-}
-
-
 
 NTSTATUS tracim_create_file(struct vfs_handle_struct *handle,
 				   struct smb_request *req,
@@ -1798,7 +1104,7 @@ NTSTATUS tracim_create_file(struct vfs_handle_struct *handle,
 				   struct smb2_create_blobs *out_context_blobs)
 {
     const char *fname = smb_fname->base_name;
-    DEBUG(0, ("Tracim: tracim_create_file(%s) : TODO\n", fname));
+    DEBUG(0, ("Tracim: tracim_create_file(%s)\n", fname));
     NTSTATUS status = NT_STATUS_OK;
     connection_struct *conn = handle->conn;
     int fd = -1;
@@ -1957,7 +1263,7 @@ NTSTATUS tracim_create_file(struct vfs_handle_struct *handle,
 	// 	allocation_size, private_flags,
 	// 	sd, ea_list, result,
 	// 	pinfo, in_context_blobs, out_context_blobs);
-	smb_fname->st.st_ex_nlink = 1; // To force VALID_STAT to say file exists.
+	// smb_fname->st.st_ex_nlink = 1; // To force VALID_STAT to say file exists.
 	status = SMB_VFS_NEXT_CREATE_FILE(
 		handle, req, dirfsp, smb_fname,
 		access_mask, share_access,
@@ -1968,7 +1274,7 @@ NTSTATUS tracim_create_file(struct vfs_handle_struct *handle,
 		sd, ea_list, result,
 		pinfo, in_context_blobs, out_context_blobs);
 	if (!NT_STATUS_IS_OK(status)) {
-    	DEBUG(0, ("tracim_create_file: Fail created file: %s (fd=%d), force : TODO\n", fname, fd));
+    	DEBUG(0, ("tracim_create_file: ERROR : Fail created file: %s (fd=%d), force : TODO\n", fname, fd));
 		return status;
 	}
     // Add to files_struct list
@@ -1997,7 +1303,7 @@ NTSTATUS tracim_create_file(struct vfs_handle_struct *handle,
 static int tracim_fcntl(vfs_handle_struct *handle, files_struct *fsp, int cmd, va_list cmd_arg)
 {
     int fd = fsp_get_io_fd(fsp);
-    DEBUG(0, ("Tracim: tracim_fcntl(cmd=%d on fd=%d) : TODO\n", cmd, fd));
+    DEBUG(0, ("Tracim: tracim_fcntl(cmd=%d on fd=%d)\n", cmd, fd));
 	/*
 	 * SMB_VFS_FCNTL() is currently only called by vfs_set_blocking() to
 	 * clear O_NONBLOCK, etc for LOCK_MAND and FIFOs. Ignore it.
@@ -2037,7 +1343,7 @@ int tracim_posix_lock(vfs_handle_struct *handle, int fd, int cmd, struct flock *
 	if (!data) {
 		return -1;
 	}
-    DEBUG(0, ("Tracim: tracim_lock(fd=%d, op=%d) : TODO\n", fd, cmd));
+    DEBUG(0, ("Tracim: tracim_lock(fd=%d, op=%d)\n", fd, cmd));
 	char * op;
 	json_t *request = json_object();
 	if (cmd == F_SETLK || cmd == F_SETLKW) {
@@ -2076,7 +1382,7 @@ int tracim_posix_lock(vfs_handle_struct *handle, int fd, int cmd, struct flock *
 	json_t *response = send_request(data, request);
 	json_decref(request);
     if (!response) {
-        DEBUG(0, ("tracim_lock: Failed to get response\n"));
+        DEBUG(0, ("tracim_lock: ERROR : Failed to get response\n"));
         return -1; // SMB_VFS_NEXT_OPENAT(handle, dirfsp, smb_fname, fsp, how);
     }
     json_t *success_obj = json_object_get(response, "success");
@@ -2153,7 +1459,7 @@ static bool tracim_lock(struct vfs_handle_struct *handle,
 			     off_t count, int type)
 {
     int fd = fsp_get_io_fd(fsp);
-    DEBUG(0, ("Tracim: tracim_lock(op=%d on fd=%d) : TODO\n", op, fd));
+    DEBUG(0, ("Tracim: tracim_lock(op=%d on fd=%d)\n", op, fd));
 	struct flock flock = { 0, };
 	int ret;
 	bool ok = false;
@@ -2199,7 +1505,7 @@ static bool tracim_getlock(struct vfs_handle_struct *handle,
 				off_t *pcount, int *ptype, pid_t *ppid)
 {
     int fd = fsp_get_io_fd(fsp);
-    DEBUG(0, ("Tracim: tracim_lockget(fd=%d) : TODO\n", fd));
+    DEBUG(0, ("Tracim: tracim_lockget(fd=%d)\n", fd));
 	struct flock flock = { 0, };
 	int ret;
 	flock.l_type = *ptype;

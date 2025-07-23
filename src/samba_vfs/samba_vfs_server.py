@@ -90,7 +90,6 @@ class SambaVFSServer:
                 if not data:
                     logger.info(self, f"Recv nothing.")
                     break
-
                 # Parse request
                 requests = []
                 try:
@@ -205,8 +204,9 @@ class SambaVFSServer:
                 )
             elif op == "unlink":
                 result = self._fs_service.unlink(
-                    request.get("path", -1),
-                    request.get("flags", -1)
+                    path=request.get("path", ""),
+                    fd=request.get("fd", 0),
+                    flags=request.get("flags", 0)
                 )
             elif op == "lock":
                     result = self._fs_service.lock_file(
@@ -223,6 +223,13 @@ class SambaVFSServer:
 						dst=request.get("dst", ""),
 						srcfd=request.get("srcfd", 0),
 						dstfd=request.get("dstfd", 0)
+					)
+            elif op == "xattr":
+                    result = self._fs_service.xattr_file(
+						user=request.get("user", ""),
+						path=request.get("path", ""),
+						name=request.get("name", ""),
+						value=request.get("value", None)
 					)
             else:
                 logger.warning(self, f"process_request({op}) : Unknown operation")
