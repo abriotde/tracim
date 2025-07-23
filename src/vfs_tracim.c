@@ -263,7 +263,6 @@ static int tracim_connect(vfs_handle_struct *handle, const char *service, const 
     
     SMB_VFS_HANDLE_SET_DATA(handle, data, NULL, struct tracim_data, return -1);
     
-	
     json_t *request = json_object();
     json_object_set_new(request, "op", json_string("init"));
     json_object_set_new(request, "mount", json_string(handle->conn->connectpath));
@@ -925,7 +924,7 @@ int tracim_fremovexattr(struct vfs_handle_struct *handle, struct files_struct *f
 static ssize_t tracim_pread(vfs_handle_struct *handle, files_struct *fsp, 
                             void *data_buf, size_t n, off_t offset)
 {
-	int fd = fsp_get_io_fd(fsp);
+	int fd = fsp_get_pathref_fd(fsp);
 	DEBUG(0, ("Tracim: tracim_pread(%d).\n", fd));
     ssize_t result = -1;
     struct tracim_data *data = get_tracim_data(handle);
@@ -997,7 +996,7 @@ static ssize_t tracim_pwrite(vfs_handle_struct *handle, files_struct *fsp,
     encoded_data[n] = '\0';
     request = json_object();
     json_object_set_new(request, "op", json_string("write"));
-    json_object_set_new(request, "fd", json_integer(fsp_get_io_fd(fsp)));
+    json_object_set_new(request, "fd", json_integer(fsp_get_pathref_fd(fsp)));
     json_object_set_new(request, "data", json_string(encoded_data));
     json_object_set_new(request, "size", json_integer(n));
     json_object_set_new(request, "offset", json_integer(offset));
@@ -1302,7 +1301,7 @@ NTSTATUS tracim_create_file(struct vfs_handle_struct *handle,
  */
 static int tracim_fcntl(vfs_handle_struct *handle, files_struct *fsp, int cmd, va_list cmd_arg)
 {
-    int fd = fsp_get_io_fd(fsp);
+    int fd = fsp_get_pathref_fd(fsp);
     DEBUG(0, ("Tracim: tracim_fcntl(cmd=%d on fd=%d)\n", cmd, fd));
 	/*
 	 * SMB_VFS_FCNTL() is currently only called by vfs_set_blocking() to
@@ -1442,6 +1441,74 @@ int tracim_posix_lock(vfs_handle_struct *handle, int fd, int cmd, struct flock *
     json_decref(response);
 	return 0;
 }
+int tracim_truncate(vfs_handle_struct *handle, files_struct *fsp, off_t len)
+{
+	struct tracim_data *data = get_tracim_data(handle);
+	char *encoded_data;
+	if (!data) {
+		return -1;
+	}
+	int result = 0;
+    int fd = fsp_get_pathref_fd(fsp);
+    DEBUG(0, ("Tracim: tracim_truncate(fd=%d)\n", fd));
+    json_t *request = json_object();
+    json_object_set_new(request, "op", json_string("truncate"));
+    json_object_set_new(request, "fd", json_integer(fd));
+    json_object_set_new(request, "user", json_string(data->user));
+    json_t *response = send_request(data, request);
+    json_decref(request);
+    if (response) {
+		json_t *success_obj = json_object_get(response, "success");
+		if (success_obj && json_is_true(success_obj)) {
+			result = 0;
+		} else {
+			result = -1;
+			success_obj = json_object_get(response, "error");
+			DEBUG(0, ("Tracim: tracim_connect() failed: %s\n", json_string_value(success_obj)));
+		}
+	} else {
+        DEBUG(0, ("tracim_connect: Failed to get response for open\n"));
+        return -1;
+    }
+    json_decref(response);
+	return result;
+}
+
+int tracim_allocate(vfs_handle_struct *handle, files_struct *fsp,
+			uint32_t mode, off_t offset, off_t len)
+{
+	struct tracim_data *data = get_tracim_data(handle);
+	char *encoded_data;
+	if (!data) {
+		return -1;
+	}
+	int result = 0;
+    int fd = fsp_get_pathref_fd(fsp);
+    DEBUG(0, ("Tracim: vfswrap_allocate(fd=%d)\n", fd));
+    json_t *request = json_object();
+    json_object_set_new(request, "op", json_string("allocate"));
+    json_object_set_new(request, "fd", json_integer(fd));
+    json_object_set_new(request, "offset", json_integer(offset));
+    json_object_set_new(request, "len", json_integer(len));
+    json_object_set_new(request, "user", json_string(data->user));
+    json_t *response = send_request(data, request);
+    json_decref(request);
+    if (response) {
+		json_t *success_obj = json_object_get(response, "success");
+		if (success_obj && json_is_true(success_obj)) {
+			result = 0;
+		} else {
+			result = -1;
+			success_obj = json_object_get(response, "error");
+			DEBUG(0, ("Tracim: tracim_connect() failed: %s\n", json_string_value(success_obj)));
+		}
+	} else {
+        DEBUG(0, ("tracim_connect: Failed to get response for open\n"));
+        return -1;
+    }
+    json_decref(response);
+	return result;
+}
 /**
  * @brief 
  * 
@@ -1458,7 +1525,7 @@ static bool tracim_lock(struct vfs_handle_struct *handle,
 			     files_struct *fsp, int op, off_t offset,
 			     off_t count, int type)
 {
-    int fd = fsp_get_io_fd(fsp);
+    int fd = fsp_get_pathref_fd(fsp);
     DEBUG(0, ("Tracim: tracim_lock(op=%d on fd=%d)\n", op, fd));
 	struct flock flock = { 0, };
 	int ret;
@@ -1504,7 +1571,7 @@ static bool tracim_getlock(struct vfs_handle_struct *handle,
 				files_struct *fsp, off_t *poffset,
 				off_t *pcount, int *ptype, pid_t *ppid)
 {
-    int fd = fsp_get_io_fd(fsp);
+    int fd = fsp_get_pathref_fd(fsp);
     DEBUG(0, ("Tracim: tracim_lockget(fd=%d)\n", fd));
 	struct flock flock = { 0, };
 	int ret;
@@ -1571,11 +1638,13 @@ static struct vfs_fn_pointers tracim_functions = {
 	.fcntl_fn = tracim_fcntl,
 
 	.lock_fn = tracim_lock,
-	.getlock_fn = tracim_getlock
+	.getlock_fn = tracim_getlock,
 	// .brl_lock_windows_fn = vfswrap_brl_lock_windows,
 	// .brl_unlock_windows_fn = vfswrap_brl_unlock_windows,
 	// .strict_lock_check_fn = vfswrap_strict_lock_check,
 	// For best performances : pread_recv_fn && pread_send_fn && pwrite_recv_fn && pwrite_send_fn
+	.ftruncate_fn = tracim_truncate,
+	.fallocate_fn = tracim_allocate
 };
 
 NTSTATUS vfs_tracim_init(TALLOC_CTX *ctx)

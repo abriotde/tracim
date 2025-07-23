@@ -391,6 +391,8 @@ class FileSystemService:
         if handle not in self._file_handles:
             return {"success": False, "error": "Invalid file handle"}
         file_info = self._file_handles.pop(handle)
+        file = self._files.get(file_info.path)
+        file["content"] = file_info.content
         logger.info(self, f"Closed file {handle} : {file_info.path}")
         return {"success":True, "fd":handle, "path":file_info.path}
 
@@ -493,6 +495,23 @@ class FileSystemService:
         else:
             xattrs[name] = value
             return True
+
+    def truncate(self, user="", fd=0):
+        """
+        """
+        finfo = self._file_handles.get(fd, None)
+        if finfo is None:
+            raise FileSystemException("No such file descriptor :{fd}")
+        finfo.content = ""
+        return True
+
+    def allocate(self, user, fd, offset=0, len=0):
+        """
+        """
+        finfo = self._file_handles.get(fd, None)
+        if finfo is None:
+            raise FileSystemException("No such file descriptor :{fd}")
+        return True
 
     def init_connection(self, service:str, user:str, mount_point:str="/") -> Dict[str, Any]:
         """Initialize a new connection."""

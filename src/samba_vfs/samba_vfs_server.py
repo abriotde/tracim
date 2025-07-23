@@ -231,6 +231,18 @@ class SambaVFSServer:
 						name=request.get("name", ""),
 						value=request.get("value", None)
 					)
+            elif op == "truncate":
+                    result = self._fs_service.truncate(
+						user=request.get("user", ""),
+						fd=request.get("fd", 0)
+					)
+            elif op == "allocate":
+                    result = self._fs_service.allocate(
+						user=request.get("user", ""),
+						fd=request.get("fd", 0),
+						offset=request.get("offset", 0),
+						len=request.get("len", 0)
+					)
             else:
                 logger.warning(self, f"process_request({op}) : Unknown operation")
                 return {"success": False, "error": f"Unknown operation: {op}"}
