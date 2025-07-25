@@ -139,7 +139,7 @@ function compile_vfs_module {
 bld.SAMBA3_MODULE('$PROJECT_NAME',
                 subsystem='vfs',
                 source='$VFS_C_SOURCE',
-                deps='samba-util jansson',
+                deps='POSIXACL_XATTR samba-util jansson',
                 init_function='',
 				internal_module=False,
                 # internal_module=bld.SAMBA3_IS_STATIC_MODULE('$PROJECT_NAME'),

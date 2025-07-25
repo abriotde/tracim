@@ -17,8 +17,12 @@
 #include "lib/util/sys_rw.h"
 #include "../librpc/gen_ndr/ioctl.h" // For create_file_unixpath()
 #include "librpc/gen_ndr/ndr_xattr.h"
+#include "modules/posixacl_xattr.h"
+#include "modules/posixacl_xattr.c"
 #include "smbd/fd_handle.h"
 #include <jansson.h>
+#include <linux/posix_acl.h>
+#include <linux/posix_acl_xattr.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <errno.h>
@@ -565,30 +569,40 @@ static int tracim_unlinkat(vfs_handle_struct *handle,
                            const struct smb_filename *smb_fname,
                            int flags)
 {
-	DEBUG(0, ("Tracim: tracim_unlinkat().\n"));
-    struct tracim_data *data = get_tracim_data(handle);
-    json_t *request, *response, *success_obj;
-    int result = -1;
-    
-    if (!data) {
-        return result;
-    }
 	char * path = smb_fname->base_name;
 	if (smb_fname->fsp && smb_fname->fsp->fsp_name && smb_fname->fsp->fsp_name->base_name && strlen(smb_fname->fsp->fsp_name->base_name)>1) {
 		path = smb_fname->fsp->fsp_name->base_name;
 	}
-    request = json_object();
+	DEBUG(0, ("Tracim: tracim_unlinkat(%s).\n", path));
+    struct tracim_data *data = get_tracim_data(handle);
+    int result = -1;
+    if (!data) {
+        return result;
+    }
+    json_t *request = json_object();
     json_object_set_new(request, "op", json_string("unlink"));
     json_object_set_new(request, "path", json_string(path));
 	json_object_set_new(request, "fd", json_integer(fsp_get_pathref_fd(dirfsp)));
-    response = send_request(data, request);
+    json_t *response = send_request(data, request);
     json_decref(request);
     if (!response) {
         return result;
     }
-    success_obj = json_object_get(response, "success");
+    json_t *success_obj = json_object_get(response, "success");
     if (success_obj) {
-        result = json_is_true(success_obj) ? 0 : -1;
+        if (json_is_true(success_obj)) {
+            result = 0;
+        } else {
+            success_obj = json_object_get(response, "error");
+            if (success_obj && json_is_string(success_obj)) {
+                const char *error = json_string_value(success_obj);
+    			DEBUG(0, ("Tracim: tracim_fstatat() : ERROR : %s\n", error));
+                if (strstr(error, "currently open")) {
+                    errno = EBUSY;  // Critical: Set errno for sharing violation
+                }
+            }
+            result = -1;
+        }
     }
     json_decref(response);
     return result; // >= 0 ? result : SMB_VFS_NEXT_UNLINKAT(handle, dirfsp, smb_fname, flags);
@@ -851,8 +865,93 @@ ssize_t tracim_fgetxattr(struct vfs_handle_struct *handle, struct files_struct *
         }
         memcpy(value, blob.data, blob.length);
 		result = blob.length; // sizeof(struct xattr_DOSATTRIB);
+	} else if (strcmp(name, ACL_EA_DEFAULT)==0 || strcmp(name, ACL_EA_ACCESS)==0) { // Call for posixacl_xattr_acl_get_fd()
+		// DEFAULT : Template for permissions on newly created files/subdirectories
+		// ACCESS : Controls actual access permissions to the file/directory
+		ssize_t ret;
+        SMB_STRUCT_STAT sbuf;
+        acl_t acl = NULL;
+        ssize_t acl_blob_size = 0;
+        void *acl_blob = NULL;
+
+		struct posix_acl_xattr_header header;
+		struct posix_acl_xattr_entry *acl_entries;
+		size_t total_size;
+		int i;
+		char *buffer = (char *)value;
+		int num_entries = 4;
+		total_size = sizeof(struct posix_acl_xattr_header) + (num_entries * sizeof(struct posix_acl_xattr_entry));
+		if (size == 0) {
+			return total_size;
+		}
+		if (size < total_size) {
+			errno = ERANGE;
+			return -1;
+		}
+		header.a_version = htole32(POSIX_ACL_XATTR_VERSION);
+		memcpy(buffer, &header, sizeof(header));
+		buffer += sizeof(header);
+    	acl_entries = (struct posix_acl_xattr_entry *)buffer;
+		int fd = fsp_get_pathref_fd(fsp);
+		// TODO
+		/* Owner entry (rwx) */
+		acl_entries[0].e_tag = ACL_USER_OBJ;
+		acl_entries[0].e_perm = ACL_READ | ACL_WRITE | ACL_EXECUTE;
+		acl_entries[0].e_id = 0;
+		/* Group entry (rwx) */
+		acl_entries[1].e_tag = ACL_GROUP_OBJ;
+		acl_entries[1].e_perm = ACL_READ | ACL_WRITE | ACL_EXECUTE;
+		acl_entries[1].e_id = 0;
+		/* Other entry (rwx) */
+		acl_entries[2].e_tag = ACL_OTHER;
+		acl_entries[2].e_perm = ACL_READ | ACL_WRITE | ACL_EXECUTE;
+		acl_entries[2].e_id = 0;
+		/* Mask entry (rwx) - required when there are extended entries */
+		acl_entries[3].e_tag = ACL_MASK;
+		acl_entries[3].e_perm = ACL_READ | ACL_WRITE | ACL_EXECUTE;
+		acl_entries[3].e_id = 0;
+
+        DEBUG(0, ("tracim_fgetxattr: Returning default ACL, size:%ld\n", total_size));
+        return total_size;
+		/*
+        acl = acl_get_fd_np(fd, ACL_TYPE_DEFAULT);
+        if (acl == NULL) {
+            if (errno == ENOENT || errno == ENOATTR) {
+                // No default ACL set
+                DEBUG(10, ("No default ACL found\n"));
+                errno = ENOATTR;
+                return -1;
+            } else {
+                DEBUG(3, ("tracim_fgetxattr: Failed to get default ACL: %s\n", strerror(errno)));
+                return -1;
+            }
+        }
+        // Convert ACL to binary format
+        acl_blob = acl_to_any_text(acl, NULL, ',', TEXT_ABBREVIATE);
+        if (acl_blob == NULL) {
+            DEBUG(3, ("tracim_fgetxattr: Failed to convert ACL to text: %s\n", strerror(errno)));
+            acl_free(acl);
+            return -1;
+        }
+         * For a more proper implementation, you should convert to 
+         * the actual POSIX ACL binary format that Samba expects.
+         * This is a simplified version that returns the text representation.
+         *
+        acl_blob_size = strlen((char *)acl_blob);
+        if (size == 0) {
+            ret = acl_blob_size;
+        } else if (size >= acl_blob_size) {
+            memcpy(value, acl_blob, acl_blob_size);
+            ret = acl_blob_size;
+        } else { // Buffer too small
+            errno = ERANGE;
+            ret = -1;
+        }
+        acl_free(acl_blob);
+        acl_free(acl);
+		*/
 	} else {
-    	DEBUG(0, ("Tracim: tracim_fgetxattr(%s, %s, %ld) : unimplemented\n", fsp->fsp_name->base_name, name, size));
+    	DEBUG(0, ("Tracim: tracim_fgetxattr(%s, %s, %ld) : unimplemented TODO\n", fsp->fsp_name->base_name, name, size));
 	}
 	char * encoded = (char*)malloc(result*2+1);
 	base64_encode(value, result, encoded);
@@ -1058,7 +1157,8 @@ uint64_t tracim_disk_free(struct vfs_handle_struct *handle,
 				uint64_t *dfree,
 				uint64_t *dsize)
 {
-    DEBUG(0, ("Tracim: tracim_disk_free() : TODO\n"));
+    const char *fname = smb_fname->base_name;
+    DEBUG(0, ("Tracim: tracim_disk_free(%s) : TODO\n", fname));
     int ret = 0; // SMB_VFS_NEXT_DISK_FREE(handle, smb_fname, bsize, dfree, dsize);
   	*dfree = 1000;
 	*bsize = 4096;
@@ -1302,7 +1402,7 @@ NTSTATUS tracim_create_file(struct vfs_handle_struct *handle,
 static int tracim_fcntl(vfs_handle_struct *handle, files_struct *fsp, int cmd, va_list cmd_arg)
 {
     int fd = fsp_get_pathref_fd(fsp);
-    DEBUG(0, ("Tracim: tracim_fcntl(cmd=%d on fd=%d)\n", cmd, fd));
+    DEBUG(0, ("Tracim: tracim_fcntl(cmd=%d on fd=%d) : TODO\n", cmd, fd));
 	/*
 	 * SMB_VFS_FCNTL() is currently only called by vfs_set_blocking() to
 	 * clear O_NONBLOCK, etc for LOCK_MAND and FIFOs. Ignore it.
@@ -1504,10 +1604,77 @@ int tracim_allocate(vfs_handle_struct *handle, files_struct *fsp,
 		}
 	} else {
         DEBUG(0, ("tracim_connect: Failed to get response for open\n"));
+		errno = EACCES;
         return -1;
     }
     json_decref(response);
 	return result;
+}
+int tracim_filesystem_sharemode(vfs_handle_struct *handle,
+					files_struct *fsp,
+					uint32_t share_access,
+					uint32_t access_mask)
+{
+    DEBUG(0, ("tracim_filesystem_sharemode: TODO\n"));
+	return 0;
+}
+int tracim_fchmod(vfs_handle_struct *handle, files_struct *fsp, mode_t mode)
+{
+    DEBUG(0, ("tracim_fchmod: TODO\n"));
+	return 0;
+}
+int tracim_fchown(vfs_handle_struct *handle, files_struct *fsp, uid_t uid, gid_t gid)
+{
+    DEBUG(0, ("tracim_fchown: TODO\n"));
+	return 0;
+}
+/**
+ * @brief Change owner and group of FILE, if it is a symbolic
+ *  link the ownership of the symbolic link is changed
+ * 
+ * @param handle 
+ * @param smb_fname 
+ * @param uid 
+ * @param gid 
+ * @return int 
+ */
+int tracim_lchown(vfs_handle_struct *handle,
+			const struct smb_filename *smb_fname,
+			uid_t uid, gid_t gid)
+{
+    DEBUG(0, ("tracim_lchown: TODO\n"));
+	return 0;
+}
+int tracim_chdir(vfs_handle_struct *handle,
+			const struct smb_filename *smb_fname)
+{
+    DEBUG(0, ("tracim_chdir(%s): TODO\n", smb_fname->base_name));
+	return SMB_VFS_NEXT_CHDIR(handle, smb_fname);
+}
+static int tracim_mkdirat(vfs_handle_struct *handle,
+			struct files_struct *dirfsp,
+			const struct smb_filename *smb_fname,
+			mode_t mode)
+{
+	int result;
+	int fd = fsp_get_pathref_fd(dirfsp);
+    DEBUG(0, ("tracim_mkdir(%s): TODO\n", smb_fname->base_name));
+	return result;
+}
+/**
+ * @brief Fill statbuf
+ * 
+ * @param handle 
+ * @param smb_fname 
+ * @param statbuf 
+ * @return int 
+ */
+int tracim_statvfs(struct vfs_handle_struct *handle,
+			   const struct smb_filename *smb_fname,
+			   struct vfs_statvfs_struct *statbuf)
+{
+    DEBUG(0, ("tracim_statvfs(%s): TODO\n", smb_fname->base_name));
+	return 0;
 }
 /**
  * @brief 
@@ -1555,6 +1722,20 @@ static bool tracim_lock(struct vfs_handle_struct *handle,
 out:
 	return ok;
 }
+NTSTATUS tracim_brl_lock_windows(struct vfs_handle_struct *handle,
+					 struct byte_range_lock *br_lck,
+					 struct lock_struct *plock)
+{
+    DEBUG(0, ("Tracim: tracim_brl_lock_windows() : TODO\n"));
+	return NT_STATUS_OK;
+}
+bool tracim_brl_unlock_windows(struct vfs_handle_struct *handle,
+				       struct byte_range_lock *br_lck,
+			               const struct lock_struct *plock)
+{
+    DEBUG(0, ("Tracim: tracim_brl_unlock_windows() : TODO\n"));
+	return True;
+}
 /**
  * @brief 
  * 
@@ -1567,7 +1748,7 @@ out:
  * @return true 
  * @return false 
  */
-static bool tracim_getlock(struct vfs_handle_struct *handle,
+bool tracim_getlock(struct vfs_handle_struct *handle,
 				files_struct *fsp, off_t *poffset,
 				off_t *pcount, int *ptype, pid_t *ppid)
 {
@@ -1590,6 +1771,38 @@ static bool tracim_getlock(struct vfs_handle_struct *handle,
 	*ppid = flock.l_pid;
 	return true;
 }
+/**
+ * @brief Returns True if the region required is currently unlocked, False if locked.
+ * 
+ * @param handle 
+ * @param fsp 
+ * @param plock 
+ * @return true 
+ * @return false 
+ */
+static bool tracim_strict_lock_check(struct vfs_handle_struct *handle,
+				      files_struct *fsp,
+				      struct lock_struct *plock)
+{
+	int fd = fsp_get_pathref_fd(fsp);
+    DEBUG(0, ("Tracim: tracim_strict_lock_check(fd=%d) TODO\n", fd));
+	return True;
+}
+static int tracim_sys_acl_delete_def_fd(vfs_handle_struct *handle,
+					 files_struct *fsp)
+{
+	int fd = fsp_get_pathref_fd(fsp);
+    DEBUG(0, ("Tracim: tracim_sys_acl_delete_def_fd(fd=%d) TODO\n", fd));
+	return 0;
+}
+static int tracim_fntimes(vfs_handle_struct *handle,
+			   files_struct *fsp,
+			   struct smb_file_time *ft)
+{
+	int fd = fsp_get_pathref_fd(fsp);
+    DEBUG(0, ("Tracim: tracim_fntimes(fd=%d) TODO\n", fd));
+	return 0;
+}
 
 /* VFS operations structure for Samba 4.x : Not ok before */
 static struct vfs_fn_pointers tracim_functions = {
@@ -1607,21 +1820,15 @@ static struct vfs_fn_pointers tracim_functions = {
 	.lseek_fn = tracim_lseek,
     .pwrite_fn = tracim_pwrite,
     .unlinkat_fn = tracim_unlinkat,
-
-    .fgetxattr_fn = tracim_fgetxattr,
-    .fsetxattr_fn = tracim_fsetxattr,
-    .fremovexattr_fn = tracim_fremovexattr,
-    .flistxattr_fn = tracim_flistxattr,
- 
     .fdopendir_fn = tracim_opendir,
     .readdir_fn = tracim_readdir,
     .closedir_fn = tracim_closedir,
 
 	.file_id_create_fn = NULL,
 	.fstreaminfo_fn = NULL,
-	.brl_lock_windows_fn = NULL,
-	.brl_unlock_windows_fn = NULL,
-	.strict_lock_check_fn = NULL,
+	.brl_lock_windows_fn = tracim_brl_lock_windows,
+	.brl_unlock_windows_fn = tracim_brl_unlock_windows,
+	.strict_lock_check_fn = tracim_strict_lock_check,
 	.translate_name_fn = NULL,
 	.fsctl_fn = NULL,
 	/* NT ACL Operations */
@@ -1639,12 +1846,33 @@ static struct vfs_fn_pointers tracim_functions = {
 
 	.lock_fn = tracim_lock,
 	.getlock_fn = tracim_getlock,
-	// .brl_lock_windows_fn = vfswrap_brl_lock_windows,
-	// .brl_unlock_windows_fn = vfswrap_brl_unlock_windows,
+	.brl_lock_windows_fn = tracim_brl_lock_windows,
+	.brl_unlock_windows_fn = tracim_brl_unlock_windows,
 	// .strict_lock_check_fn = vfswrap_strict_lock_check,
 	// For best performances : pread_recv_fn && pread_send_fn && pwrite_recv_fn && pwrite_send_fn
 	.ftruncate_fn = tracim_truncate,
-	.fallocate_fn = tracim_allocate
+	.fallocate_fn = tracim_allocate,
+	.filesystem_sharemode_fn = tracim_filesystem_sharemode,
+	.fchmod_fn = tracim_fchmod,
+	.fchown_fn = tracim_fchown,
+	.lchown_fn = tracim_lchown,
+	.chdir_fn = tracim_chdir,
+	.mkdirat_fn = tracim_mkdirat,
+	.statvfs_fn = tracim_statvfs,
+	.fntimes_fn = tracim_fntimes,
+//	.parent_pathname_fn = tracim_parent_pathname,
+
+    .fgetxattr_fn = tracim_fgetxattr,
+    .fsetxattr_fn = tracim_fsetxattr,
+    .fremovexattr_fn = tracim_fremovexattr,
+    .flistxattr_fn = tracim_flistxattr,
+ 
+	// Inspired by sys_acl_get_fd_fn from vfs_glusterfs.c. Using posixacl_xattr_acl_get_fd from posixacl_xattr.c
+	.sys_acl_get_fd_fn = posixacl_xattr_acl_get_fd,
+	.sys_acl_blob_get_fd_fn = posix_sys_acl_blob_get_fd,
+	.sys_acl_set_fd_fn = posixacl_xattr_acl_set_fd,
+	.sys_acl_delete_def_fd_fn = posixacl_xattr_acl_delete_def_fd,
+
 };
 
 NTSTATUS vfs_tracim_init(TALLOC_CTX *ctx)

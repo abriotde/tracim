@@ -282,6 +282,20 @@ class FileSystemService:
         """
         TODO : recursive for directories
         """
+        # Check if file is open
+        for handle_id, file_info in self._file_handles.items():
+            if file_info.path == path:
+                raise FileSystemException("File is currently open")
+        # Check if directory is open
+        for handle_id, dir_info in self.dir_handles.items():
+            if dir_info.path == path:
+                raise FileSystemException("Directory is currently open")
+        # Actual deletion
+        if path in self._files:
+            del self._files[path]
+            return True
+        else:
+            raise FileSystemException("File not found")
         # if flags & AT_REMOVEDIR: # AT_REMOVEDIR=0x200 cf fcntl.h
         # del self._files[path]
         # Remove all opened files : Unix way is to wait they close there fd?
@@ -391,8 +405,9 @@ class FileSystemService:
         if handle not in self._file_handles:
             return {"success": False, "error": "Invalid file handle"}
         file_info = self._file_handles.pop(handle)
-        file = self._files.get(file_info.path)
-        file["content"] = file_info.content
+        file = self._files.get(file_info.path, None)
+        if file is not None:
+	        file["content"] = file_info.content
         logger.info(self, f"Closed file {handle} : {file_info.path}")
         return {"success":True, "fd":handle, "path":file_info.path}
 
