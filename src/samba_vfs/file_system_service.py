@@ -3,7 +3,7 @@ import os
 from typing import Dict, Any, Optional
 import time
 import typing
-from enum import Enum
+from enum import Enum, IntEnum
 from dataclasses import dataclass, field
 from pluggy import PluginManager
 from tracim_backend.config import CFG
@@ -22,6 +22,43 @@ class FileSystemException(Exception):
     def __init__(self, message):
         super().__init__(*args)
         self.message = message
+
+# Check smb_constants.h to update these constants.
+class FileDisposition(IntEnum):
+	FILE_SUPERSEDE = 0 			# File exists overwrite/supersede. File not exist create.
+	FILE_OPEN = 1 				# File exists open. File not exist fail.
+	FILE_CREATE = 2 				# File exists fail. File not exist create.
+	FILE_OPEN_IF = 3 				# File exists open. File not exist create.
+	FILE_OVERWRITE = 4 			# File exists overwrite. File not exist fail.
+	FILE_OVERWRITE_IF = 5 		# File exists overwrite. File not exist create.
+
+class FileOptions(IntEnum):
+	FILE_DIRECTORY_FILE = 0x0001
+	FILE_WRITE_THROUGH = 0x0002
+	FILE_SEQUENTIAL_ONLY = 0x0004
+	FILE_NO_INTERMEDIATE_BUFFERING = 0x0008
+	FILE_SYNCHRONOUS_IO_ALERT = 0x0010	# may be ignored
+	FILE_SYNCHRONOUS_IO_NONALERT = 0x0020	# may be ignored
+	FILE_NON_DIRECTORY_FILE = 0x0040
+	FILE_CREATE_TREE_CONNECTION = 0x0080	# ignore, should be zero
+	FILE_COMPLETE_IF_OPLOCKED = 0x0100	# ignore, should be zero
+	FILE_NO_EA_KNOWLEDGE = 0x0200
+	FILE_EIGHT_DOT_THREE_ONLY = 0x0400 # aka OPEN_FOR_RECOVERY: ignore, should be zero
+	FILE_RANDOM_ACCESS = 0x0800
+	FILE_DELETE_ON_CLOSE = 0x1000
+	FILE_OPEN_BY_FILE_ID = 0x2000
+	FILE_OPEN_FOR_BACKUP_INTENT = 0x4000
+	FILE_NO_COMPRESSION = 0x8000
+	FILE_RESERVER_OPFILTER = 0x00100000	# ignore, should be zero
+	FILE_OPEN_REPARSE_POINT = 0x00200000
+	FILE_OPEN_NO_RECALL = 0x00400000
+	FILE_OPEN_FOR_FREE_SPACE_QUERY = 0x00800000 # ignore should be zero
+
+class FileInfo(IntEnum):
+	FILE_WAS_SUPERSEDED = 0
+	FILE_WAS_OPENED = 1
+	FILE_WAS_CREATED = 2
+	FILE_WAS_OVERWRITTEN = 3
 
 class FLockType(Enum):
     RDLCK = 1
@@ -252,10 +289,7 @@ class FileSystemService:
             position=0,
             content=file_info.get("content", "")
 		)
-        return {
-            "success": True,
-            "handle": handle_id
-        }
+        return handle_id
     
     def read_file(self, handle: int, size: int) -> Dict[str, Any]:
         """Read data from a file."""
@@ -332,35 +366,61 @@ class FileSystemService:
         }
 
     def create_file(self, path:str="", user:str="", 
-            mode=0, flags=0, attr=0, size=0, is_dir=False) -> Dict[str, Any]:
+            options:FileOptions=0, disposition:FileDisposition=0, attr=0, size=0, is_dir=False, fd=-1) -> Dict[str, Any]:
+        """
+        * @param disposition : 
+        * @param options : 
+        * @return:
+         * info:FileInfo
+         * fd : File descriptor of the opened file (if asked).
+        """
         if path=="":
             return {
                 "success": False,
                 "error": "No path given"
             }
+        fd = -1
         path = os.path.normpath(path)
         file_info = self._files.get(path, None)
+        info = -1
+        exists = file_info is not None
         if file_info is None:
-            self._files[path] = {
-                "exists": True,
-                "is_directory": is_dir,
-                "size": size,
-                "mtime": int(time.time()),
-                "can_read": True,
-                "can_write": True
-            }
-        else:
+            if (disposition & int(FileDisposition.FILE_CREATE)) or disposition == FileDisposition.FILE_OVERWRITE_IF:
+                exists = True
+                info = FileInfo.FILE_WAS_CREATED
+                self._files[path] = {
+                	"exists": True,
+                	"is_directory": is_dir,
+                	"size": size,
+                	"mtime": int(time.time()),
+                	"can_read": True,
+                	"can_write": True
+                }
+        if exists and ((options & int(FileDisposition.FILE_OPEN)) or (options & int(FileDisposition.FILE_OVERWRITE))):
+            if fd>0:
+                finfo = self._file_handles.get(fd, None)
+                if finfo is not None and finfo.path==path:
+                    ok = True
+                else:
+                    if is_dir:
+                        fd = self.open_directory(path, user, mask=0)
+                    else:
+                        fd = self.open_file(path, user, flags=0, mode=0)
+                    if fd>0 and info==-1:
+                        if options & int(FileDisposition.FILE_OVERWRITE):
+                            info = FileInfo.FILE_WAS_OVERWRITTEN
+                        else:
+                            info = FileInfo.FILE_WAS_OPENED
             is_dir = file_info.get("is_directory", False)
-        if is_dir:
-            finfo = self.open_directory(path, user, mode)
-        else:
-            finfo = self.open_file(path, user, flags, mode)
         
-        return {
+        retValue = {
 			"success": True,
 			"size": size,
-            "fd": finfo.get("handle", -1)
+            "info": int(info),
 		}
+        if fd!=-1:
+            retValue["fd"] = fd
+        return retValue
 
     def lock_file(self, fd, len, pid, start, type:FLockType, whence:FLockWhence):
         """
@@ -440,7 +500,7 @@ class FileSystemService:
             path=""
         for fpath in self._files.keys():
             fpath_parent = os.path.dirname(fpath)
-            logger.info(self, f"Test2 {fpath_parent} : {path}")
+            # logger.info(self, f"Test2 {fpath_parent} : {path}")
             if fpath_parent==path and path not in [".",".."]:
                 entries.append(os.path.basename(fpath))
         self.dir_handles[handle_id] = SambaVFSFileHandler(
@@ -451,11 +511,7 @@ class FileSystemService:
             position= 0
 		)
         
-        return {
-            "success": True,
-            "handle": handle_id,
-            "entries": entries
-        }
+        return handle_id
     
     def read_directory(self, handle: int) -> Dict[str, Any]:
         """Read the next entry from a directory."""

@@ -156,12 +156,12 @@ class SambaVFSServer:
                     "atime": file_info.get("atime", mtime),
                 }
             elif op == "open":
-                return self._fs_service.open_file(
+                result = {"fd": self._fs_service.open_file(
                     request.get("path", ""),
                     request.get("user", ""),
                     request.get("flags", 0),
                     request.get("mode", 0)
-                )
+                )}
             elif op == "read":
                 return self._fs_service.read_file(
                     request.get("fd", -1),
@@ -178,22 +178,23 @@ class SambaVFSServer:
                 return self._fs_service.create_file(
                     path=request.get("path", ""),
                     user=request.get("user", ""),
-                    mode=request.get("mode", 0),
-                    flags=request.get("flags", 0),
+                    disposition=request.get("disposition", 0),
+                    options=request.get("options", 0),
                     attr=request.get("attr", 0),
                     size=request.get("size", 0),
-                    is_dir=request.get("dir", 0)==1
+                    is_dir=request.get("dir", 0)==1,
+                    fd=request.get("fd", -1)
                 )
             elif op == "close":
                 return self._fs_service.close_file(
                     request.get("handle", -1)
                 )
             elif op == "opendir":
-                return self._fs_service.open_directory(
+                result = {"fd": self._fs_service.open_directory(
                     request.get("path", ""),
                     request.get("user", ""),
                     request.get("mask", "")
-                )
+                )}
             elif op == "readdir":
                 return self._fs_service.read_directory(
                     request.get("handle", -1)
