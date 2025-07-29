@@ -1182,6 +1182,36 @@ int tracim_get_quota (struct vfs_handle_struct *handle,
 
 }
 
+/**
+ * @brief 
+ * 
+ * @param handle 
+ * @param req 
+ * @param dirfsp 
+ * @param smb_fname 
+ * @param access_mask 
+ * @param share_access 
+ * @param create_disposition : 
+   - FILE_SUPERSEDE 0	File exists overwrite/supersede. File not exist create.
+   - FILE_OPEN 1		File exists open. File not exist fail.
+   - FILE_CREATE 2		File exists fail. File not exist create.
+   - FILE_OPEN_IF 3		File exists open. File not exist create.
+   - FILE_OVERWRITE 4	File exists overwrite. File not exist fail.
+   - FILE_OVERWRITE_IF 5	File exists overwrite. File not exist create.
+ * @param create_options 
+ * @param file_attributes 
+ * @param oplock_request 
+ * @param lease 
+ * @param allocation_size 
+ * @param private_flags 
+ * @param sd 
+ * @param ea_list 
+ * @param result 
+ * @param pinfo 
+ * @param in_context_blobs 
+ * @param out_context_blobs 
+ * @return NTSTATUS 
+ */
 NTSTATUS tracim_create_file(struct vfs_handle_struct *handle,
 				   struct smb_request *req,
 				   struct files_struct *dirfsp,
@@ -1209,63 +1239,6 @@ NTSTATUS tracim_create_file(struct vfs_handle_struct *handle,
     int fd = -1;
     int open_flags = 0;
     mode_t mode = 0644;
-    /* bool file_existed = false;
-    struct stat st;
-    int info = 0;
-    *result = NULL;
-    // Handle create disposition
-    switch (create_disposition) {
-        case FILE_SUPERSEDE:
-            open_flags = O_CREAT | O_TRUNC | O_RDWR;
-            info = file_existed ? FILE_WAS_SUPERSEDED : FILE_WAS_CREATED;
-            break;
-            
-        case FILE_OPEN:
-            if (!file_existed) {
-                return NT_STATUS_OBJECT_NAME_NOT_FOUND;
-            }
-            open_flags = O_RDWR;
-            info = FILE_WAS_OPENED;
-            break;
-            
-        case FILE_CREATE:
-            if (file_existed) {
-                return NT_STATUS_OBJECT_NAME_COLLISION;
-            }
-            open_flags = O_CREAT | O_EXCL | O_RDWR;
-            info = FILE_WAS_CREATED;
-            break;
-            
-        case FILE_OPEN_IF:
-            open_flags = O_CREAT | O_RDWR;
-            info = file_existed ? FILE_WAS_OPENED : FILE_WAS_CREATED;
-            break;
-            
-        case FILE_OVERWRITE:
-            if (!file_existed) {
-                return NT_STATUS_OBJECT_NAME_NOT_FOUND;
-            }
-            open_flags = O_TRUNC | O_RDWR;
-            info = FILE_WAS_OVERWRITTEN;
-            break;
-            
-        case FILE_OVERWRITE_IF:
-            open_flags = O_CREAT | O_TRUNC | O_RDWR;
-            info = file_existed ? FILE_WAS_OVERWRITTEN : FILE_WAS_CREATED;
-            break;
-        default:
-            return NT_STATUS_INVALID_PARAMETER;
-    }
-    if (access_mask & FILE_WRITE_DATA) {
-        // Already set O_RDWR above
-    } else if (access_mask & FILE_READ_DATA) {
-        open_flags &= ~O_RDWR;
-        open_flags |= O_RDONLY;
-    }
-
-    if (create_options & FILE_DELETE_ON_CLOSE) {
-        DBG_DEBUG("Delete on close requested for %s\n", fname);
-    } */
     
 	struct tracim_data *data = get_tracim_data(handle);
 	json_t *request, *response, *success_obj, *bytes_obj;
@@ -1273,109 +1246,90 @@ NTSTATUS tracim_create_file(struct vfs_handle_struct *handle,
 	if (!data) {
 		return NT_STATUS_ABANDONED;
 	}
-	request = json_object();
-	json_object_set_new(request, "op", json_string("create"));
-	json_object_set_new(request, "path", json_string(fname));
-	json_object_set_new(request, "flags", json_integer(open_flags));
-	json_object_set_new(request, "mode", json_integer(mode));
-	json_object_set_new(request, "size", json_integer(allocation_size));
-	json_object_set_new(request, "attr", json_integer(file_attributes));
-    if (create_options & FILE_DIRECTORY_FILE) {
-		json_object_set_new(request, "dir", json_integer(1));
-        if (mkdir(fname, 0755) != 0) {
-            if (errno == EEXIST && create_disposition == FILE_OPEN_IF) {
-				DEBUG(0, ("tracim_create_file: FILE_DIRECTORY_FILE/FILE_OPEN_IF : %s.\n", fname));
-            } else {
-				DEBUG(0, ("tracim_create_file: FILE_DIRECTORY_FILE/not FILE_OPEN_IF : %s.\n", fname));
-            }
-        }
-        fd = -1;
-    } else {
-		json_object_set_new(request, "dir", json_integer(0));
-		DEBUG(0, ("tracim_create_file: SIMPLE_FILE : %s.\n", fname));
-    }
-	response = send_request(data, request);
-	json_decref(request);
-	if (!response) {
-		return NT_STATUS_ABANDONED;
-	}
-	success_obj = json_object_get(response, "success");
-	if (success_obj && json_is_true(success_obj)) {
-		success_obj = json_object_get(response, "fd");
-		if (success_obj && json_is_integer(success_obj)) {
-			fd = json_integer_value(success_obj);
+	// Case create file if not exists.
+	if (create_disposition & FILE_CREATE || create_disposition==FILE_OVERWRITE_IF || create_disposition==FILE_SUPERSEDE) {
+		// Case we want to open file if not exists, set open_flags.
+		if (create_disposition & FILE_OPEN) { // Case FILE_OPEN_IF
+			DEBUG(0, ("tracim_create_file: FILE_CREATE/FILE_OPEN : %s.\n", fname));
+			open_flags = O_RDONLY;
+		} else if (create_disposition & FILE_OVERWRITE || create_disposition==FILE_SUPERSEDE) {
+			DEBUG(0, ("tracim_create_file: FILE_CREATE/FILE_OVERWRITE : %s.\n", fname));
+			open_flags = O_WRONLY | O_TRUNC;
 		}
-	} else {
-		success_obj = json_object_get(response, "error");
-		if (success_obj) {
-			DEBUG(0, ("tracim_create_file: ERROR creating %s : %s.", fname, json_string_value(success_obj)));
+		request = json_object();
+		json_object_set_new(request, "op", json_string("create"));
+		json_object_set_new(request, "path", json_string(fname));
+		json_object_set_new(request, "flags", json_integer(open_flags));
+		json_object_set_new(request, "mode", json_integer(mode));
+		json_object_set_new(request, "size", json_integer(allocation_size));
+		json_object_set_new(request, "attr", json_integer(file_attributes));
+		if (create_options & FILE_DIRECTORY_FILE) { // Is directory
+			json_object_set_new(request, "dir", json_integer(1));
+			if (create_disposition == FILE_OPEN_IF) {
+				DEBUG(0, ("tracim_create_file: FILE_DIRECTORY_FILE/FILE_OPEN_IF : %s.\n", fname));
+			} else {
+				DEBUG(0, ("tracim_create_file: FILE_DIRECTORY_FILE/not FILE_OPEN_IF : %s.\n", fname));
+			}
+		} else {
+			json_object_set_new(request, "dir", json_integer(0));
+			DEBUG(0, ("tracim_create_file: SIMPLE_FILE : %s.\n", fname));
+		}
+		response = send_request(data, request);
+		json_decref(request);
+		if (!response) {
 			return NT_STATUS_ABANDONED;
 		}
+		success_obj = json_object_get(response, "success");
+		if (success_obj && json_is_true(success_obj)) {
+			success_obj = json_object_get(response, "fd");
+			if (success_obj && json_is_integer(success_obj)) {
+				fd = json_integer_value(success_obj);
+				int fd0 = fsp_get_pathref_fd(smb_fname->fsp);
+				if (fd0!=fd && fd>0) {
+					DEBUG(0, ("tracim_create_file: set fd %d (%d).", fd, fd0));
+					// fsp_set_fd(smb_fname->fsp, -1); // Set to -1 to close previous fd
+					// fsp_set_fd(smb_fname->fsp, fd);
+				}
+			}
+		} else {
+			success_obj = json_object_get(response, "error");
+			if (success_obj) {
+				DEBUG(0, ("tracim_create_file: ERROR creating %s : %s.", fname, json_string_value(success_obj)));
+				return NT_STATUS_ACCESS_DENIED;
+			}
+		}
+		json_decref(response);
+	}else if (create_disposition & FILE_OPEN || create_disposition==FILE_OVERWRITE) { // Do not create file, just open it.
+		const char *mask = "r"; // Default read-only access
+		int attr = 0; // Default attributes
+		if (create_options & FILE_DIRECTORY_FILE) {
+			DEBUG(0, ("tracim_create_file: FILE_OPEN with FILE_DIRECTORY_FILE : %s.\n", fname));
+			int fd = (int)tracim_opendir(handle, smb_fname->fsp, mask, attr);
+		} else {
+			DEBUG(0, ("tracim_create_file: FILE_OPEN simple file : TODO.\n"));
+			// int fd = tracim_openat(handle, smb_fname->fsp, mask, attr);
+		}
+		if (fd>0) {
+			// fsp_set_fd(smb_fname->fsp, -1); // Set to -1 to close previous fd
+			// fsp_set_fd(smb_fname->fsp, fd);
+		}
 	}
-	json_decref(response);
-	/*
-    DEBUG(0, ("Tracim: tracim_create_file() : fsp_new\n"));
-	// status = fsp_new(conn, conn, &fsp);
-	// if (!NT_STATUS_IS_OK(status)) {
-	// 	return status;
+	// if (!(create_options & FILE_DIRECTORY_FILE)) {
+		status = SMB_VFS_NEXT_CREATE_FILE(
+			handle, req, dirfsp, smb_fname,
+			access_mask, share_access,
+			create_disposition, create_options,
+			file_attributes, oplock_request,
+			lease,
+			allocation_size, private_flags,
+			sd, ea_list, result,
+			pinfo, in_context_blobs, out_context_blobs);
+		if (!NT_STATUS_IS_OK(status)) {
+			DEBUG(0, ("tracim_create_file: ERROR : Fail created file: %s (fd=%d), force : TODO\n", fname, fd));
+			DEBUG(0, ("tracim_create_file: SMB_VFS_NEXT_CREATE_FILE failed: %s\n", nt_errstr(status)));
+			return status;
+		}
 	// }
-    status = file_new(req, conn, &fsp);
-    if (!NT_STATUS_IS_OK(status)) {
-        if (fd != -1) close(fd);
-        return status;
-    }
-    DEBUG(0, ("Tracim: tracim_create_file() : cp_smb_filename\n"));
-    fsp->fsp_name = cp_smb_filename(fsp, smb_fname);
-	fsp_set_fd(fsp, fd);
-    if (fsp->fsp_name == NULL) {
-        file_free(req, fsp);
-        if (fd != -1) close(fd);
-        return NT_STATUS_NO_MEMORY;
-    }
-    // fsp->fh->position_information = 0;
-    // fsp->fh->private_options = private_flags;
-    fsp->access_mask = access_mask;
-    fsp->share_mode_flags = share_access;
-    // fsp->fh->gen_id = get_gen_count();
-    
-    if (create_options & FILE_DIRECTORY_FILE) {
-        fsp->fsp_flags.is_directory = true;
-		fsp_set_fd(fsp, fd);
-    } else {
-        fsp->fsp_flags.is_directory = false;
-        // if (fstat(fd, &st) == 0) {
-            // fsp->file_id = vfs_file_id_from_sbuf(conn, &st);
-            // fsp->fh->file_size = st.st_size;
-        // }
-    }
-    fsp->oplock_type = NO_OPLOCK;
-    if (oplock_request != NO_OPLOCK) {
-        fsp->oplock_type = EXCLUSIVE_OPLOCK;
-    } */
-    
-	// status = create_file_tracim(
-	// 	handle->conn, req, dirfsp, smb_fname,
-	// 	access_mask, share_access,
-	// 	create_disposition, create_options,
-	// 	file_attributes, oplock_request,
-	// 	lease,
-	// 	allocation_size, private_flags,
-	// 	sd, ea_list, result,
-	// 	pinfo, in_context_blobs, out_context_blobs);
-	// smb_fname->st.st_ex_nlink = 1; // To force VALID_STAT to say file exists.
-	status = SMB_VFS_NEXT_CREATE_FILE(
-		handle, req, dirfsp, smb_fname,
-		access_mask, share_access,
-		create_disposition, create_options,
-		file_attributes, oplock_request,
-		lease,
-		allocation_size, private_flags,
-		sd, ea_list, result,
-		pinfo, in_context_blobs, out_context_blobs);
-	if (!NT_STATUS_IS_OK(status)) {
-    	DEBUG(0, ("tracim_create_file: ERROR : Fail created file: %s (fd=%d), force : TODO\n", fname, fd));
-		return status;
-	}
     // Add to files_struct list
     // DLIST_ADD(conn->sconn->files, fsp);
     // conn->num_files_open++;
@@ -1824,13 +1778,13 @@ static struct vfs_fn_pointers tracim_functions = {
     .readdir_fn = tracim_readdir,
     .closedir_fn = tracim_closedir,
 
-	.file_id_create_fn = NULL,
-	.fstreaminfo_fn = NULL,
+	// .file_id_create_fn = NULL,
+	// .fstreaminfo_fn = NULL,
 	.brl_lock_windows_fn = tracim_brl_lock_windows,
 	.brl_unlock_windows_fn = tracim_brl_unlock_windows,
 	.strict_lock_check_fn = tracim_strict_lock_check,
-	.translate_name_fn = NULL,
-	.fsctl_fn = NULL,
+	// .translate_name_fn = NULL,
+	// .fsctl_fn = NULL,
 	/* NT ACL Operations */
 	.fget_nt_acl_fn = NULL,
 	.fset_nt_acl_fn = NULL,
