@@ -154,6 +154,7 @@ class SambaVFSServer:
                     "mtime": file_info.get("mtime", int(time.time())),
                     "ctime": file_info.get("ctime", mtime),
                     "atime": file_info.get("atime", mtime),
+                    "inode": file_info.get("inode", hash(path)),
                 }
             elif op == "open":
                 result = {"fd": self._fs_service.open_file(

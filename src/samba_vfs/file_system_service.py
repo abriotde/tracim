@@ -20,7 +20,7 @@ from tracim_backend.lib.webdav.dav_provider import ProcessedWebdavPath
 
 class FileSystemException(Exception):
     def __init__(self, message):
-        super().__init__(*args)
+        super().__init__(message)
         self.message = message
 
 # Check smb_constants.h to update these constants.
@@ -231,10 +231,10 @@ class FileSystemService:
         self.db = None  # Placeholder - replace with your actual DB connection
         logger.info(self, "Tracim file service initialized")
         self._file_handles:Dict[int, SambaVFSFileHandler] = {}  # Store open file handles
-        self.dir_handles:Dict[int, SambaVFSFileHandler] = {}  # Store open directory handles
+        self._dir_handles:Dict[int, SambaVFSFileHandler] = {}  # Store open directory handles
         self.active_connections:Dict[int, SambaVFSSession] = {}  # Store active connections
         self.active_users:Dict[str, int] = {} # Index connection's id by username.
-        self.next_handle_id = 1  # Incremental ID for file and directory handles, do not use 0 as it can be confused to NULL in C VFS cast.
+        self._next_fd = 1  # Incremental ID for file and directory handles, do not use 0 as it can be confused to NULL in C VFS cast.
         self.config = config
         self._files = {}
         self.mount_point = ""
@@ -265,21 +265,19 @@ class FileSystemService:
         # Check if file exists and user has permissions
         file_info = self.get_file_info(path, username)
         if not file_info.get("exists", False):
-            return {"success": False, "error": "File not found"}
-        
+            raise FileSystemException("File not found")
+
         # Check read/write permissions based on flags
         read_required = (flags & os.O_RDONLY) or (flags & os.O_RDWR)
         write_required = (flags & os.O_WRONLY) or (flags & os.O_RDWR)
-        
         if read_required and not file_info.get("can_read", False):
-            return {"success": False, "error": "Permission denied (read)"}
-        
+            raise FileSystemException("Permission denied (read)")
         if write_required and not file_info.get("can_write", False):
-            return {"success": False, "error": "Permission denied (write)"}
-        
+            raise FileSystemException("Permission denied (write)")
+
         # Placeholder - store file info for later operations
-        handle_id = self.next_handle_id
-        self.next_handle_id += 1
+        handle_id = self._next_fd
+        self._next_fd += 1
         
         self._file_handles[handle_id] = SambaVFSFileHandler(
             path=path,
@@ -316,26 +314,40 @@ class FileSystemService:
         """
         TODO : recursive for directories
         """
-        # Check if file is open
-        for handle_id, file_info in self._file_handles.items():
-            if file_info.path == path:
-                raise FileSystemException("File is currently open")
-        # Check if directory is open
-        for handle_id, dir_info in self.dir_handles.items():
-            if dir_info.path == path:
-                raise FileSystemException("Directory is currently open")
-        # Actual deletion
-        if path in self._files:
-            del self._files[path]
-            return True
-        else:
-            raise FileSystemException("File not found")
+        finfo = self._files.get(path, None)
+        finfo["todel"] = True
+        return self.check_del(finfo)
+        
+    def check_del(self, finfo):
+        """
+        Delete a file or directory if it is marked for deletion and all fd are closed.
+        """
+        # Check if file is marked for deletion
+        if finfo.get("todel", False):
+            # Check open files
+            path = finfo.get("path", "")
+            if finfo.get("is_directory", False):
+                for handle_id, dir_info in self._dir_handles.items():
+                    if dir_info.path == path:
+                        return False
+            else:
+                for handle_id, file_info in self._file_handles.items():
+                    if file_info.path == path:
+                        return False
+
+            if path in self._files:
+                del self._files[path]
+                return True
+            else:
+                # Should be impossible, but maybe on multi threaded access?
+                raise FileSystemException("File not found")
+        
         # if flags & AT_REMOVEDIR: # AT_REMOVEDIR=0x200 cf fcntl.h
         # del self._files[path]
         # Remove all opened files : Unix way is to wait they close there fd?
         # foodict = {k: v for k, v in self._file_handles.items() if v.path!=path}
         # self._file_handles = foodict
-        return True
+        return False
     
     def write_file(self, handle: int, data: str, size: int, offset:int) -> Dict[str, Any]:
         """Write data to a file."""
@@ -468,6 +480,7 @@ class FileSystemService:
         file = self._files.get(file_info.path, None)
         if file is not None:
 	        file["content"] = file_info.content
+        self.check_del(file)
         logger.info(self, f"Closed file {handle} : {file_info.path}")
         return {"success":True, "fd":handle, "path":file_info.path}
 
@@ -478,17 +491,14 @@ class FileSystemService:
         # Check if directory exists and user has permissions
         dir_info = self.get_file_info(path, username)
         if not dir_info.get("exists", False):
-            return {"success": False, "error": "Directory not found"}
-        
+            raise FileSystemException("Directory not found")
         if not dir_info.get("is_directory", False):
-            return {"success": False, "error": "Not a directory"}
-        
+            raise FileSystemException("Not a directory")
         if not dir_info.get("can_read", False):
-            return {"success": False, "error": "Permission denied"}
-        
-        # Placeholder - set up directory contents for readdir
-        handle_id = self.next_handle_id
-        self.next_handle_id += 1
+            raise FileSystemException("Permission denied")
+
+        fd = self._next_fd
+        self._next_fd += 1
         
         # workspace = self._get_workspace(username)
         # files = workspace.get_member_list()
@@ -503,22 +513,21 @@ class FileSystemService:
             # logger.info(self, f"Test2 {fpath_parent} : {path}")
             if fpath_parent==path and path not in [".",".."]:
                 entries.append(os.path.basename(fpath))
-        self.dir_handles[handle_id] = SambaVFSFileHandler(
+        self._dir_handles[fd] = SambaVFSFileHandler(
             path= path,
             username= username,
             mask= mask,
             entries= entries,
             position= 0
 		)
-        
-        return handle_id
+        return fd
     
     def read_directory(self, handle: int) -> Dict[str, Any]:
         """Read the next entry from a directory."""
         logger.info(self, f"Reading from directory handle {handle}")
-        if handle not in self.dir_handles:
+        if handle not in self._dir_handles:
             return {"success": False, "error": "Invalid directory handle"}
-        dir_info = self.dir_handles[handle]
+        dir_info = self._dir_handles[handle]
         entries = dir_info.entries
         position = dir_info.position
         logger.info(self, f"read_directory(fd={handle}) : entries={entries}, position={position}")
@@ -545,11 +554,11 @@ class FileSystemService:
         """Close a directory handle."""
         logger.info(self, f"Closing directory handle {handle}")
         
-        if handle not in self.dir_handles:
+        if handle not in self._dir_handles:
             return {"success": False, "error": "Invalid directory handle"}
         
 		# Clean up handle
-        dir_info = self.dir_handles.pop(handle)
+        dir_info = self._dir_handles.pop(handle)
         logger.info(self, f"Closed directory {dir_info.path}")
         return {"success":True, "handle":handle}
 
@@ -593,8 +602,8 @@ class FileSystemService:
         
         # Placeholder
         self.mount_point = os.path.normpath(mount_point)
-        conn_id = self.next_handle_id
-        self.next_handle_id += 1
+        conn_id = self._next_fd
+        self._next_fd += 1
         context = SambaVFSTracimContext(self.config, "TheAdmin") # TODO User is set in hardcoded to 'TheAdmin' should be 'user'
         """ workspace_container = WorkspaceAndContentContainer(
             path="/",
@@ -615,7 +624,7 @@ class FileSystemService:
                 "size": 16,
                 "mtime": int(time.time()),
                 "can_read": True,
-                "can_write": True
+                "can_write": True,
             },
         	f"user_{user}" : {
                 "exists": True,
@@ -644,6 +653,9 @@ class FileSystemService:
                 "content": "My docs!"
             }
         }
+        for path, f in self._files.items():
+            f["inode"] = hash(path) & 0xFFFFFFFF
+            f["path"] = path
         return {"success": True, "connection_id": conn_id}
 
     def _get_workspace(self, username:str):
