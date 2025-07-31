@@ -1321,9 +1321,14 @@ static NTSTATUS tracim_create_file(struct vfs_handle_struct *handle,
 	int info = FILE_WAS_OPENED;
 	struct tracim_data *data = get_tracim_data(handle);
 	if (!data) {
+		DEBUG(0, ("Tracim: tracim_create_file(%s) : ERROR : NT_STATUS_INTERNAL_ERROR\n", fname));
 		return NT_STATUS_INTERNAL_ERROR;
 	}
-	int fd0 = fsp_get_pathref_fd(smb_fname->fsp);
+	DEBUG(0, ("Tracim: tracim_create_file(%s) : Data ok\n", fname));
+	int fd0 = 0;
+	if (smb_fname && smb_fname->fsp) {
+		fd0 = fsp_get_pathref_fd(smb_fname->fsp);
+	}
 	json_t *request = json_object();
 	json_object_set_new(request, "op", json_string("create"));
 	json_object_set_new(request, "path", json_string(fname));
@@ -1346,8 +1351,10 @@ static NTSTATUS tracim_create_file(struct vfs_handle_struct *handle,
 	json_t *response = send_request(data, request);
 	json_decref(request);
 	if (!response) {
+		DEBUG(0, ("Tracim: tracim_create_file(%s) : ERROR : No response\n", fname));
 		return NT_STATUS_ABANDONED;
 	}
+	DEBUG(0, ("Tracim: tracim_create_file(%s) : response\n", fname));
 	int fd = -1;
 	json_t *success_obj = json_object_get(response, "success");
 	if (success_obj && json_is_true(success_obj)) {
@@ -1376,7 +1383,8 @@ static NTSTATUS tracim_create_file(struct vfs_handle_struct *handle,
 		}
 	}
 	json_decref(response);
-
+	DEBUG(0, ("Tracim: tracim_create_file(%s) : OK\n", fname));
+	/*
 	// Create files_struct manually (don't use SMB_VFS_NEXT_CREATE_FILE)
 	status = file_new(req, conn, &fsp);
 	if (!NT_STATUS_IS_OK(status)) {
@@ -1397,8 +1405,7 @@ static NTSTATUS tracim_create_file(struct vfs_handle_struct *handle,
 		fsp->fsp_name->st.st_ex_mode = S_IFREG | 0644;
 		fsp->fsp_flags.is_directory = false;
 	}
-	// tracim_fill_stat(&smb_fname->st, fname, fsp->fsp_flags.is_directory, allocation_size, handle);
-	// tracim_fill_stat(&fsp->fsp_name->st, fname, fsp->fsp_flags.is_directory, allocation_size, handle);
+	tracim_stat(handle, smb_fname);
 	// Add to connection's file list
 	DLIST_ADD(conn->sconn->files, fsp);
 	conn->num_files_open++;
@@ -1417,8 +1424,7 @@ static NTSTATUS tracim_create_file(struct vfs_handle_struct *handle,
 		DEBUG(0, ("tracim_create_file: Share access DELETE : %s.\n", fname));
 	} else {
 		DEBUG(0, ("tracim_create_file: Share access ALL : %s : %d.\n", fname, share_access));
-	}
-	// tracim_stat(handle, smb_fname);
+	} */
 
 	status = SMB_VFS_NEXT_CREATE_FILE(
 		handle, req, dirfsp, smb_fname,
@@ -1889,7 +1895,7 @@ static struct vfs_fn_pointers tracim_functions = {
 	// .get_quota_fn = vfs_not_implemented_get_quota,
 	// .set_quota_fn = vfs_not_implemented_set_quota,
 	// .get_quota_fn = tracim_get_quota
-	// .create_file_fn = tracim_create_file,
+	.create_file_fn = tracim_create_file,
 	.renameat_fn = tracim_renameat,
 	// .fcntl_fn = tracim_fcntl,
 
