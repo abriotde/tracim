@@ -486,16 +486,16 @@ int tracim_stat_sub(json_t *request, vfs_handle_struct *handle, SMB_STRUCT_STAT 
 
     json_obj = json_object_get(response, "success");
     if (json_obj && json_is_true(json_obj)) {
-    	sbuf->st_ex_dev = TRACIM_DEVICE_ID;
+    	// sbuf->st_ex_dev = TRACIM_DEVICE_ID;
 		bool is_dir = false;
 		DEBUG(0, ("Tracim: tracim_stat() : file was, %ld, %d, %ld.\n", 
 			sbuf->st_ex_size, sbuf->st_ex_mode, sbuf->st_ex_mtime.tv_sec));
 
-		json_obj = json_object_get(response, "inode");
-		if (json_obj && json_is_integer(json_obj)) {
-			DEBUG(0, ("Tracim: tracim_stat_sub() : inode:%ld.\n", json_integer_value(json_obj)));
-			sbuf->st_ex_ino = json_integer_value(json_obj);
-		}
+		// json_obj = json_object_get(response, "inode");
+		// if (json_obj && json_is_integer(json_obj)) {
+		// 	DEBUG(0, ("Tracim: tracim_stat_sub() : inode:%ld.\n", json_integer_value(json_obj)));
+		// 	sbuf->st_ex_ino = json_integer_value(json_obj);
+		// }
 		json_obj = json_object_get(response, "size");
 		if (json_obj && json_is_integer(json_obj)) {
 			sbuf->st_ex_size = json_integer_value(json_obj);
@@ -531,7 +531,7 @@ int tracim_stat_sub(json_t *request, vfs_handle_struct *handle, SMB_STRUCT_STAT 
 		DEBUG(0, ("Tracim: tracim_stat() : Ok.\n"));
     } else {
 		errno = ENOENT; // File not found
-		result = 1;
+		result = -1;
 		json_obj = json_object_get(response, "error");
 		DEBUG(0, ("Tracim: tracim_stat() : fail get response : %s.\n", json_string_value(json_obj)));
 	}
@@ -539,7 +539,7 @@ int tracim_stat_sub(json_t *request, vfs_handle_struct *handle, SMB_STRUCT_STAT 
     // result = SMB_VFS_NEXT_STAT(handle, smb_fname);
 	// DEBUG(0, ("Tracim: tracim_stat() : file SMB_VFS_NEXT_STAT : %ld, %d, %ld.\n", sbuf->st_ex_size, sbuf->st_ex_mode, sbuf->st_ex_mtime.tv_sec));
 	DEBUG(0, ("Tracim: tracim_stat() : %d.\n", result));
-	return 0;
+	return result;
 }
 
 /**
@@ -626,6 +626,7 @@ static int tracim_fstatat(
 		struct vfs_handle_struct *handle, const struct files_struct *dirfsp,
 		const struct smb_filename *smb_fname, SMB_STRUCT_STAT *sbuf, int flags) {
     DEBUG(0, ("Tracim: tracim_fstatat()\n"));
+    DEBUG(0, ("Tracim: tracim_fstatat()\n"));
     struct tracim_data *data = get_tracim_data(handle);
     if (!data) {
         return -1;
@@ -635,12 +636,15 @@ static int tracim_fstatat(
 		return SMB_VFS_NEXT_FSTATAT(handle, dirfsp, smb_fname, sbuf, flags);
 	}
     json_t *request = json_object();
-	char * path = smb_fname->base_name;
-	if (smb_fname->fsp && smb_fname->fsp->fsp_name && smb_fname->fsp->fsp_name->base_name && strlen(smb_fname->fsp->fsp_name->base_name)>1) {
+	const char *path = talloc_asprintf(talloc_tos(),
+		"%s/%s", dirfsp->fsp_name->base_name, smb_fname->base_name);
+	/* if (smb_fname->fsp && smb_fname->fsp->fsp_name && smb_fname->fsp->fsp_name->base_name && strlen(smb_fname->fsp->fsp_name->base_name)>1) {
 		path = smb_fname->fsp->fsp_name->base_name;
-	}
+	} */
     json_object_set_new(request, "path", json_string(path));
-	return tracim_stat_sub(request, handle, sbuf, smb_fname->fsp);
+	int result = tracim_stat_sub(request, handle, sbuf, smb_fname->fsp);
+	TALLOC_FREE(path);
+	return result;
 }
 
 static int tracim_unlinkat(vfs_handle_struct *handle,
