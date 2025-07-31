@@ -405,26 +405,28 @@ class FileSystemService:
 					"can_write": True
 				}
 		if exists and ((options & int(FileDisposition.FILE_OPEN)) or (options & int(FileDisposition.FILE_OVERWRITE))):
+			ok = False
 			if fd>0:
 				finfo = self._file_descriptors.get(fd, None)
 				if finfo is not None and finfo.path==path:
 					ok = True
+			if not ok:
+				if is_dir:
+					fd = self.open_directory(path, user, mask=0)
 				else:
-					if is_dir:
-						fd = self.open_directory(path, user, mask=0)
+					fd = self.open_file(path, user, flags=0, mode=0)
+				if fd>0 and info==-1:
+					if options & int(FileDisposition.FILE_OVERWRITE):
+						info = FileInfo.FILE_WAS_OVERWRITTEN
 					else:
-						fd = self.open_file(path, user, flags=0, mode=0)
-					if fd>0 and info==-1:
-						if options & int(FileDisposition.FILE_OVERWRITE):
-							info = FileInfo.FILE_WAS_OVERWRITTEN
-						else:
-							info = FileInfo.FILE_WAS_OPENED
+						info = FileInfo.FILE_WAS_OPENED
 			is_dir = file_info.get("is_directory", False)
 		
 		retValue = {
 			"success": True,
 			"size": size,
 			"info": int(info),
+			"fd": fd,
 		}
 		if fd!=-1:
 			retValue["fd"] = fd

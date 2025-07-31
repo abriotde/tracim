@@ -1330,7 +1330,10 @@ static NTSTATUS tracim_create_file(struct vfs_handle_struct *handle,
     if (!data) {
         return NT_STATUS_INTERNAL_ERROR;
     }
-	int fd0 = fsp_get_pathref_fd(smb_fname->fsp);
+	int fd0 = 1;
+	if (smb_fname && smb_fname->fsp) {
+		fsp_get_pathref_fd(smb_fname->fsp);
+	}
 	json_t *request = json_object();
 	json_object_set_new(request, "op", json_string("create"));
 	json_object_set_new(request, "path", json_string(fname));
@@ -1383,6 +1386,20 @@ static NTSTATUS tracim_create_file(struct vfs_handle_struct *handle,
 		}
 	}
 	json_decref(response);
+	status = SMB_VFS_NEXT_CREATE_FILE(
+		handle, req, dirfsp, smb_fname,
+		access_mask, share_access,
+		create_disposition, create_options,
+		file_attributes, oplock_request,
+		lease,
+		allocation_size, private_flags,
+		sd, ea_list, result,
+		pinfo, in_context_blobs, out_context_blobs);
+	if (NT_STATUS_IS_OK(status)) {
+		return status;
+	}
+	DEBUG(0, ("tracim_create_file: ERROR : Fail created file: %s (fd=%d), try force : TODO\n", fname, fd));
+	DEBUG(0, ("tracim_create_file: SMB_VFS_NEXT_CREATE_FILE failed: %s\n", nt_errstr(status)));
 
     // Create files_struct manually (don't use SMB_VFS_NEXT_CREATE_FILE)
     status = file_new(req, conn, &fsp);
@@ -1407,6 +1424,8 @@ static NTSTATUS tracim_create_file(struct vfs_handle_struct *handle,
     // tracim_fill_stat(&smb_fname->st, fname, fsp->fsp_flags.is_directory, allocation_size, handle);
     // tracim_fill_stat(&fsp->fsp_name->st, fname, fsp->fsp_flags.is_directory, allocation_size, handle);
     // Add to connection's file list
+	smb_fname->fsp = fsp;
+	tracim_stat(handle, smb_fname);
     DLIST_ADD(conn->sconn->files, fsp);
     conn->num_files_open++;
     DEBUG(0, ("tracim_create_file: Successfully created file: %s (remote_fd=%d, fsp=%p)\n", fname, fd, fsp));
@@ -1425,7 +1444,6 @@ static NTSTATUS tracim_create_file(struct vfs_handle_struct *handle,
 	} else {
 		DEBUG(0, ("tracim_create_file: Share access ALL : %s : %d.\n", fname, share_access));
 	}
-	// tracim_stat(handle, smb_fname);
 
 	// Call next VFS function : Try to use fake folder/files
 	/* if (strcmp(fname,".")==0) {
@@ -1499,7 +1517,7 @@ static NTSTATUS tracim_create_file(struct vfs_handle_struct *handle,
 		}
         TALLOC_FREE(temp_path);
     } */
-	status = SMB_VFS_NEXT_CREATE_FILE(
+	/* status = SMB_VFS_NEXT_CREATE_FILE(
 		handle, req, dirfsp, smb_fname,
 		access_mask, share_access,
 		create_disposition, create_options,
@@ -1512,7 +1530,7 @@ static NTSTATUS tracim_create_file(struct vfs_handle_struct *handle,
 		DEBUG(0, ("tracim_create_file: ERROR : Fail created file: %s (fd=%d), force : TODO\n", fname, fd));
 		DEBUG(0, ("tracim_create_file: SMB_VFS_NEXT_CREATE_FILE failed: %s\n", nt_errstr(status)));
 		return status;
-	}
+	} */
 	DEBUG(0, ("tracim_create_file: end\n"));
 	return status;
 }
