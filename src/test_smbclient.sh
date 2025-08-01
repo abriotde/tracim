@@ -46,11 +46,18 @@ cd user_alberic
 rm test.txt 
 EOF
 			;;
+		rename)
+			eval $TEST_CMD <<EOF
+cd user_alberic
+rename test.txt test2.txt
+EOF
+			;;
 		all)
 			run cd
 			run get
 			run put
 			run rm
+			run rename
 			;;
 		*)
 			echo "NT_STATUS_UNKNOWN_TEST : Unknown command '$cmd'" >test.log

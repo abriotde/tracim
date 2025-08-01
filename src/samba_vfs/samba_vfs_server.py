@@ -188,7 +188,7 @@ class SambaVFSServer:
 					fd=request.get("fd", -1)
 				)
 			elif op == "close":
-				return self._fs_service.close_file(
+				result = self._fs_service.close_file(
 					request.get("handle", -1)
 				)
 			elif op == "opendir":

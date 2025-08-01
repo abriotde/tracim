@@ -918,7 +918,7 @@ static ssize_t tracim_fgetxattr(struct vfs_handle_struct *handle, struct files_s
     DEBUG(0, ("Tracim: tracim_fgetxattr(%s, %s, %ld)\n", fsp->fsp_name->base_name, name, size));
     struct tracim_data *data = get_tracim_data(handle);
     if (!data) {
-        DEBUG(0, ("tracim_closedir: Failed to get VFS tracim data\n"));
+        DEBUG(0, ("tracim_fgetxattr: Failed to get VFS tracim data\n"));
         return result;
     }
 	if (data->temp_path!=NULL && strstr(fsp->fsp_name->base_name, data->temp_path)!=NULL) {
