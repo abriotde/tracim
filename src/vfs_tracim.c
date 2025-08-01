@@ -416,6 +416,8 @@ static int tracim_openat(vfs_handle_struct *handle,
     json_decref(response);
 	// fd = eventfd(0, FD_CLOEXEC);
 	fsp->share_mode_flags = FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE;
+    // Explicitly allow delete access
+    fsp->access_mask |= DELETE_ACCESS;
 	DEBUG(0, ("Tracim: tracim_openat() : %s, %d.\n", path, fd));
     return fd;
 }
@@ -486,16 +488,16 @@ int tracim_stat_sub(json_t *request, vfs_handle_struct *handle, SMB_STRUCT_STAT 
 
     json_obj = json_object_get(response, "success");
     if (json_obj && json_is_true(json_obj)) {
-    	// sbuf->st_ex_dev = TRACIM_DEVICE_ID;
+    	sbuf->st_ex_dev = TRACIM_DEVICE_ID;
 		bool is_dir = false;
 		DEBUG(0, ("Tracim: tracim_stat() : file was, %ld, %d, %ld.\n", 
 			sbuf->st_ex_size, sbuf->st_ex_mode, sbuf->st_ex_mtime.tv_sec));
 
-		// json_obj = json_object_get(response, "inode");
-		// if (json_obj && json_is_integer(json_obj)) {
-		// 	DEBUG(0, ("Tracim: tracim_stat_sub() : inode:%ld.\n", json_integer_value(json_obj)));
-		// 	sbuf->st_ex_ino = json_integer_value(json_obj);
-		// }
+		json_obj = json_object_get(response, "inode");
+		if (json_obj && json_is_integer(json_obj)) {
+			DEBUG(0, ("Tracim: tracim_stat_sub() : inode:%ld.\n", json_integer_value(json_obj)));
+			sbuf->st_ex_ino = json_integer_value(json_obj);
+		}
 		json_obj = json_object_get(response, "size");
 		if (json_obj && json_is_integer(json_obj)) {
 			sbuf->st_ex_size = json_integer_value(json_obj);
@@ -1431,6 +1433,9 @@ static NTSTATUS tracim_create_file(struct vfs_handle_struct *handle,
         fsp->fsp_flags.is_directory = false;
     }
 	fsp->mid = req->mid;
+    fsp->share_mode_flags = FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE;
+    // Explicitly allow delete access
+    fsp->access_mask |= DELETE_ACCESS;
     // tracim_fill_stat(&smb_fname->st, fname, fsp->fsp_flags.is_directory, allocation_size, handle);
     // tracim_fill_stat(&fsp->fsp_name->st, fname, fsp->fsp_flags.is_directory, allocation_size, handle);
     // Add to connection's file list
@@ -1510,6 +1515,7 @@ static NTSTATUS tracim_create_file(struct vfs_handle_struct *handle,
 			char *orig_path = smb_fname->base_name;
 			data->temp_path = temp_path2;
             smb_fname->base_name = temp_path2;
+			smb_fname->st.st_ex_ino = path_to_inode(temp_path2);
 			DEBUG(0, ("tracim_create_file: init : %s\n", fsp_str_dbg(smb_fname->fsp)));
 			DEBUG(0, ("tracim_create_file: init1 : %p, %p->%p->%p\n", smb_fname->base_name, smb_fname, smb_fname->fsp, smb_fname->fsp->fsp_name));
             smb_fname->fsp->fsp_name->base_name = temp_path2;
