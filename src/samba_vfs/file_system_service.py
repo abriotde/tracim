@@ -262,8 +262,17 @@ class FileSystemService:
 		
 		# Check if file exists and user has permissions
 		file_info = self.get_file_info(path, username)
-		if not file_info.get("exists", False):
-			raise FileSystemException("File not found")
+		# flags = 133120 = 0x20800 = O_NONBLOCK|O_LARGEFILE
+		directory_required = (flags & os.O_DIRECTORY)
+		if file_info is None or not file_info.get("exists", False):
+			create_required = (flags & os.O_CREAT)
+			if not create_required:
+				raise FileSystemException("File not found (Flags : O_DIRECTORY={directory_required}, O_CREAT={create_required}.)")
+			self.create_file(path=path, username=username, disposition=FileDisposition.FILE_CREATE)
+			file_info = self.get_file_info(path, username)
+		if directory_required:
+			if not file_info.get("is_directory", False):
+				raise FileSystemException("Not a directory")
 
 		# Check read/write permissions based on flags
 		read_required = (flags & os.O_RDONLY) or (flags & os.O_RDWR)
@@ -316,10 +325,9 @@ class FileSystemService:
 		finfo = self._files.get(path, None)
 		if finfo is not None:
 			finfo["todel"] = True
-			return self.check_del(finfo)
-		else:
-			return True
-		
+			self.check_del(finfo)
+		return True
+
 	def check_del(self, finfo):
 		"""
 		Delete a file or directory if it is marked for deletion and all fd are closed.
@@ -334,9 +342,9 @@ class FileSystemService:
 			if path in self._files:
 				del self._files[path]
 				return True
-			else:
-				# Should be impossible, but maybe on multi threaded access?
-				raise FileSystemException("File not found")
+			# else:
+			#	# Should be impossible, but maybe on multi threaded access?
+			#	raise FileSystemException("File not found")
 		
 		# if flags & AT_REMOVEDIR: # AT_REMOVEDIR=0x200 cf fcntl.h
 		# del self._files[path]
@@ -374,7 +382,7 @@ class FileSystemService:
 		}
 
 	def create_file(self, path:str="", user:str="", 
-			options:FileOptions=0, disposition:FileDisposition=0, attr=0, size=0, is_dir=False, fd=-1) -> Dict[str, Any]:
+			options:FileOptions=0, disposition:FileDisposition=0, attr=0, size=0, fd=-1) -> Dict[str, Any]:
 		"""
 		* @param disposition : 
 		* @param options : 
@@ -387,47 +395,54 @@ class FileSystemService:
 				"success": False,
 				"error": "No path given"
 			}
+		is_dir = options & int(FileOptions.FILE_DIRECTORY_FILE) != 0
 		fd = -1
 		path = os.path.normpath(path)
 		file_info = self._files.get(path, None)
 		info = -1
 		exists = file_info is not None
+		inode = 0
 		if file_info is None:
-			if (disposition & int(FileDisposition.FILE_CREATE)) or disposition == FileDisposition.FILE_OVERWRITE_IF:
+			if (disposition & int(FileDisposition.FILE_CREATE) != 0) or (disposition == FileDisposition.FILE_OVERWRITE_IF):
 				exists = True
 				info = FileInfo.FILE_WAS_CREATED
+				inode = hash(path) & 0xFFFFFFFF
 				self._files[path] = {
 					"exists": True,
 					"is_directory": is_dir,
 					"size": size,
 					"mtime": int(time.time()),
 					"can_read": True,
-					"can_write": True
+					"can_write": True,
+					"content": "",
+					"inode": inode
 				}
+				file_info = self._files.get(path, None)
 		if exists and ((options & int(FileDisposition.FILE_OPEN)) or (options & int(FileDisposition.FILE_OVERWRITE))):
+			ok = False
 			if fd>0:
 				finfo = self._file_descriptors.get(fd, None)
 				if finfo is not None and finfo.path==path:
 					ok = True
+			if not ok:
+				if is_dir:
+					fd = self.open_directory(path, user, mask=0)
 				else:
-					if is_dir:
-						fd = self.open_directory(path, user, mask=0)
+					fd = self.open_file(path, user, flags=0, mode=0)
+				if fd>0 and info==-1:
+					if options & int(FileDisposition.FILE_OVERWRITE):
+						info = FileInfo.FILE_WAS_OVERWRITTEN
 					else:
-						fd = self.open_file(path, user, flags=0, mode=0)
-					if fd>0 and info==-1:
-						if options & int(FileDisposition.FILE_OVERWRITE):
-							info = FileInfo.FILE_WAS_OVERWRITTEN
-						else:
-							info = FileInfo.FILE_WAS_OPENED
-			is_dir = file_info.get("is_directory", False)
+						info = FileInfo.FILE_WAS_OPENED
 		
 		retValue = {
 			"success": True,
 			"size": size,
 			"info": int(info),
+			"fd": fd,
 		}
-		if fd!=-1:
-			retValue["fd"] = fd
+		if inode>0:
+			retValue["ino"] = inode
 		return retValue
 
 	def lock_file(self, fd, len, pid, start, type:FLockType, whence:FLockWhence):
@@ -474,6 +489,7 @@ class FileSystemService:
 		if src_finfo is None:
 			raise FileSystemException("Source file not found ({srcpath}).")
 		dst_finfo = self._files.get(dstpath, None)
+		src_finfo["inode"] = hash(dstpath) & 0xFFFFFFFF
 		if dst_finfo is not None:
 			raise FileSystemException("Can't rename {src}, destination file path ever exists ({dst}). Erase it?")
 		logger.info(self, f"Renaming file {srcpath} to {dstpath}")
@@ -489,14 +505,14 @@ class FileSystemService:
 	def close_file(self, handle: int) -> Dict[str, Any]:
 		"""Close a file handle."""
 		if handle not in self._file_descriptors:
-			return {"success": False, "error": "Invalid file handle"}
+			raise FileSystemException("Invalid file handle")
 		file_info = self._file_descriptors.pop(handle)
 		file = self._files.get(file_info.path, None)
 		if file is not None:
 			file["content"] = file_info.content
 			self.check_del(file)
-		# logger.info(self, f"Closed file {handle} : {file_info.path}")
-		return {"success":True, "fd":handle, "path":file_info.path}
+		logger.info(self, f"Closed file {handle} : {file_info.path}")
+		return True
 
 	def open_directory(self, path: str, username: str, mask: str) -> Dict[str, Any]:
 		"""Open a directory for reading."""

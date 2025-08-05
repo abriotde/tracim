@@ -357,19 +357,19 @@ static int tracim_openat(vfs_handle_struct *handle,
 		DEBUG(0, ("tracim_openat: is pathref\n"));
 	}
 	
-	request = json_object();
-	json_object_set_new(request, "op", json_string("open"));
-	json_object_set_new(request, "path", json_string(path));
-	json_object_set_new(request, "flags", json_integer(how->flags));
-	json_object_set_new(request, "mode", json_integer(how->mode));
-	json_object_set_new(request, "user", json_string(data->user));
-	json_object_set_new(request, "fd", json_integer(fd));
-	response = send_request(data, request);
-	json_decref(request);
-	if (!response) {
-		DEBUG(0, ("tracim_openat: Failed to get response for open\n"));
-		return fd;
-	}
+    request = json_object();
+    json_object_set_new(request, "op", json_string("open"));
+    json_object_set_new(request, "path", json_string(path));
+    json_object_set_new(request, "flags", json_integer(how->flags));
+    json_object_set_new(request, "mode", json_integer(how->mode));
+    json_object_set_new(request, "resolve", json_integer(how->resolve));
+    json_object_set_new(request, "user", json_string(data->user));
+    response = send_request(data, request);
+    json_decref(request);
+    if (!response) {
+        DEBUG(0, ("tracim_openat: Failed to get response for open\n"));
+        return fd;
+    }
 
 	success_obj = json_object_get(response, "success");
 	if (success_obj && json_is_true(success_obj)) {
@@ -385,7 +385,9 @@ static int tracim_openat(vfs_handle_struct *handle,
 	}
 	json_decref(response);
 	// fd = eventfd(0, FD_CLOEXEC);
-	// fsp->share_mode_flags = FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE;
+	fsp->share_mode_flags = FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE;
+    // Explicitly allow delete access
+    fsp->access_mask |= DELETE_ACCESS;
 	DEBUG(0, ("Tracim: tracim_openat() : %s, %d.\n", path, fd));
 	return fd;
 }
@@ -507,7 +509,7 @@ int tracim_stat_sub(json_t *request, vfs_handle_struct *handle, SMB_STRUCT_STAT 
 	}
 	json_decref(response);
 	// DEBUG(0, ("Tracim: tracim_stat() : file SMB_VFS_NEXT_STAT : %ld, %d, %ld.\n", sbuf->st_ex_size, sbuf->st_ex_mode, sbuf->st_ex_mtime.tv_sec));
-	DEBUG(0, ("Tracim: tracim_stat_sub() : %d.\n", result));
+	DEBUG(0, ("Tracim: tracim_stat() : %d.\n", result));
 	return result;
 }
 
@@ -597,23 +599,26 @@ static int tracim_lstat(struct vfs_handle_struct *handle, struct smb_filename *s
 static int tracim_fstatat(
 		struct vfs_handle_struct *handle, const struct files_struct *dirfsp,
 		const struct smb_filename *smb_fname, SMB_STRUCT_STAT *sbuf, int flags) {
-	DEBUG(0, ("Tracim: tracim_fstatat()\n"));
-	struct tracim_data *data = get_tracim_data(handle);
-	if (!data) {
-		return -1;
-	}
+    DEBUG(0, ("Tracim: tracim_fstatat()\n"));
+    DEBUG(0, ("Tracim: tracim_fstatat()\n"));
+    struct tracim_data *data = get_tracim_data(handle);
+    if (!data) {
+        return -1;
+    }
 	if (data->temp_path!=NULL) {
 		DEBUG(0, ("tracim_fstatat: Using temp path %s\n", data->temp_path));
 		return SMB_VFS_NEXT_FSTATAT(handle, dirfsp, smb_fname, sbuf, flags);
 	}
-	// return SMB_VFS_NEXT_FSTATAT(handle, dirfsp, smb_fname, sbuf, flags);
-	json_t *request = json_object();
-	char * path = smb_fname->base_name;
-	if (smb_fname->fsp && smb_fname->fsp->fsp_name && smb_fname->fsp->fsp_name->base_name && strlen(smb_fname->fsp->fsp_name->base_name)>1) {
+    json_t *request = json_object();
+	const char *path = talloc_asprintf(talloc_tos(),
+		"%s/%s", dirfsp->fsp_name->base_name, smb_fname->base_name);
+	/* if (smb_fname->fsp && smb_fname->fsp->fsp_name && smb_fname->fsp->fsp_name->base_name && strlen(smb_fname->fsp->fsp_name->base_name)>1) {
 		path = smb_fname->fsp->fsp_name->base_name;
-	}
-	json_object_set_new(request, "path", json_string(path));
-	return tracim_stat_sub(request, handle, sbuf, smb_fname->fsp);
+	} */
+    json_object_set_new(request, "path", json_string(path));
+	int result = tracim_stat_sub(request, handle, sbuf, smb_fname->fsp);
+	TALLOC_FREE(path);
+	return result;
 }
 
 static int tracim_unlinkat(vfs_handle_struct *handle,
@@ -845,9 +850,8 @@ static struct dirent *tracim_readdir(vfs_handle_struct *handle,
  */
 static int tracim_closedir(vfs_handle_struct *handle, DIR *dirp)
 {
-	struct vfs_example_dir *custom_dir = (struct vfs_example_dir *)dirp;
-	int result = -1;
-	json_t *request, *response, *success_obj, *entry_obj;
+    struct vfs_example_dir *custom_dir = (struct vfs_example_dir *)dirp;
+    int result = -1;
 	int fd = (int)dirp;
 	DEBUG(0, ("Tracim: tracim_closedir(%d)\n", fd));
 	struct tracim_data *data = get_tracim_data(handle);
@@ -856,23 +860,23 @@ static int tracim_closedir(vfs_handle_struct *handle, DIR *dirp)
 		return result;
 	}
 
-	request = json_object();
-	json_object_set_new(request, "op", json_string("closedir"));
-	json_object_set_new(request, "handle", json_integer(fd));
-	json_object_set_new(request, "user", json_string(data->user));
-	response = send_request(data, request);
-	json_decref(request);
+    json_t *request = json_object();
+    json_object_set_new(request, "op", json_string("closedir"));
+    json_object_set_new(request, "handle", json_integer(fd));
+    json_object_set_new(request, "user", json_string(data->user));
+    json_t *response = send_request(data, request);
+    json_decref(request);
 	if (!response) {
 		DEBUG(0, ("tracim: Failed to get response for closedir\n"));
 		return result;
 	}
-	success_obj = json_object_get(response, "success");
+    json_t *success_obj = json_object_get(response, "success");
 	if (!success_obj) {
 		if (json_is_true(success_obj)) {
 			result = 0;
 		} else {
-			entry_obj = json_object_get(response, "error");
-			DEBUG(0, ("Tracim: tracim_closedir failed: %s\n", json_string_value(entry_obj)));
+			success_obj = json_object_get(response, "error");
+			DEBUG(0, ("Tracim: tracim_closedir failed: %s\n", json_string_value(success_obj)));
 		}
 	} else {
 		DEBUG(0, ("Tracim: tracim_closedir failed\n"));
@@ -884,6 +888,7 @@ enum ndr_err_code tracim_checker(struct ndr_push * s, ndr_flags_type ndr_flags, 
 {
 	return NDR_ERR_SUCCESS;
 }
+
 /**
  * @brief Fill the 'value', wich mustn't exceed 'size' bytes. Used by fget_ea_dos_attribute called by default create_file_fn.
  *  EA names used internally in Samba. KEEP UP TO DATE with prohibited_ea_names in trans2.c !.
@@ -906,7 +911,16 @@ static ssize_t tracim_fgetxattr(struct vfs_handle_struct *handle, struct files_s
 	struct xattr_DOSATTRIB dosattrib;
 	memset(&dosattrib, 0, sizeof(dosattrib));
 	ssize_t result = size;
-	DEBUG(0, ("Tracim: tracim_fgetxattr(%s, %s, %ld)\n", fsp->fsp_name->base_name, name, size));
+    DEBUG(0, ("Tracim: tracim_fgetxattr(%s, %s, %ld)\n", fsp->fsp_name->base_name, name, size));
+    struct tracim_data *data = get_tracim_data(handle);
+    if (!data) {
+        DEBUG(0, ("tracim_fgetxattr: Failed to get VFS tracim data\n"));
+        return result;
+    }
+	if (data->temp_path!=NULL && strstr(fsp->fsp_name->base_name, data->temp_path)!=NULL) {
+		DEBUG(0, ("tracim_fgetxattr: Using SMB_VFS_NEXT_FGETXATTR (%s VS %s)\n", data->temp_path, fsp->fsp_name->base_name));
+		return SMB_VFS_NEXT_FGETXATTR(handle, fsp, name, value, size);
+	}
 	if (strcmp(name, SAMBA_XATTR_DOS_ATTRIB)==0) { // See set_ea_dos_attribute()
 		DEBUG(0, ("Tracim: tracim_fgetxattr(%s, %s, %ld) : SAMBA_XATTR_DOS_ATTRIB\n", fsp->fsp_name->base_name, name, size));
 		uint32_t dosmode = FILE_ATTRIBUTE_NORMAL;
@@ -1314,20 +1328,18 @@ static NTSTATUS tracim_create_file(struct vfs_handle_struct *handle,
 				   struct smb2_create_blobs *out_context_blobs)
 {
 	const char *fname = smb_fname->base_name;
-	DEBUG(0, ("Tracim: tracim_create_file(%s)\n", fname));
-	NTSTATUS status = NT_STATUS_OK;
-	connection_struct *conn = handle->conn;
-	files_struct *fsp = NULL;
-	int info = FILE_WAS_OPENED;
-	struct tracim_data *data = get_tracim_data(handle);
-	if (!data) {
-		DEBUG(0, ("Tracim: tracim_create_file(%s) : ERROR : NT_STATUS_INTERNAL_ERROR\n", fname));
-		return NT_STATUS_INTERNAL_ERROR;
-	}
-	DEBUG(0, ("Tracim: tracim_create_file(%s) : Data ok\n", fname));
-	int fd0 = 0;
+    DEBUG(0, ("Tracim: tracim_create_file(%s)\n", fname));
+    NTSTATUS status = NT_STATUS_OK;
+    connection_struct *conn = handle->conn;
+    files_struct *fsp = NULL;
+    int info = FILE_WAS_OPENED;
+    struct tracim_data *data = get_tracim_data(handle);
+    if (!data) {
+        return NT_STATUS_INTERNAL_ERROR;
+    }
+	int fd0 = 1;
 	if (smb_fname && smb_fname->fsp) {
-		fd0 = fsp_get_pathref_fd(smb_fname->fsp);
+		fsp_get_pathref_fd(smb_fname->fsp);
 	}
 	json_t *request = json_object();
 	json_object_set_new(request, "op", json_string("create"));
@@ -1337,17 +1349,6 @@ static NTSTATUS tracim_create_file(struct vfs_handle_struct *handle,
 	json_object_set_new(request, "size", json_integer(allocation_size));
 	json_object_set_new(request, "attr", json_integer(file_attributes));
 	json_object_set_new(request, "fd", json_integer(fd0));
-	if (create_options & FILE_DIRECTORY_FILE) { // Is directory
-		json_object_set_new(request, "dir", json_integer(1));
-		if (create_disposition == FILE_OPEN_IF) {
-			DEBUG(0, ("tracim_create_file: FILE_DIRECTORY_FILE/FILE_OPEN_IF : %s.\n", fname));
-		} else {
-			DEBUG(0, ("tracim_create_file: FILE_DIRECTORY_FILE/not FILE_OPEN_IF : %s.\n", fname));
-		}
-	} else {
-		json_object_set_new(request, "dir", json_integer(0));
-		DEBUG(0, ("tracim_create_file: SIMPLE_FILE : %s.\n", fname));
-	}
 	json_t *response = send_request(data, request);
 	json_decref(request);
 	if (!response) {
@@ -1356,24 +1357,20 @@ static NTSTATUS tracim_create_file(struct vfs_handle_struct *handle,
 	}
 	DEBUG(0, ("Tracim: tracim_create_file(%s) : response\n", fname));
 	int fd = -1;
+	int inode = 0;
 	json_t *success_obj = json_object_get(response, "success");
 	if (success_obj && json_is_true(success_obj)) {
 		success_obj = json_object_get(response, "fd");
 		if (success_obj && json_is_integer(success_obj)) {
 			fd = json_integer_value(success_obj);
-			if (fd0!=fd && fd>0) {
-				DEBUG(0, ("tracim_create_file: set fd %d (%d).", fd, fd0));
-				if (fd0>0) {
-					DEBUG(0, ("tracim_create_file: ERROR having ever fd."));
-					fsp_set_fd(smb_fname->fsp, -1); // Set to -1 to close previous fd
-				}
-				fsp_set_fd(smb_fname->fsp, fd);
-			}
 		}
-		// Get creation info
 		success_obj = json_object_get(response, "info");
 		if (success_obj && json_is_integer(success_obj)) {
 			info = json_integer_value(success_obj);
+		}
+		success_obj = json_object_get(response, "ino");
+		if (success_obj && json_is_integer(success_obj)) {
+			inode = json_integer_value(success_obj);
 		}
 	} else {
 		success_obj = json_object_get(response, "error");
@@ -1383,37 +1380,85 @@ static NTSTATUS tracim_create_file(struct vfs_handle_struct *handle,
 		}
 	}
 	json_decref(response);
-	DEBUG(0, ("Tracim: tracim_create_file(%s) : OK\n", fname));
-	/*
-	// Create files_struct manually (don't use SMB_VFS_NEXT_CREATE_FILE)
-	status = file_new(req, conn, &fsp);
-	if (!NT_STATUS_IS_OK(status)) {
-		DEBUG(0, ("tracim_create_file: file_new failed: %s\n", nt_errstr(status)));
-		return status;
-	}
-	// Set up the files_struct
-	fsp->fsp_name = cp_smb_filename(fsp, smb_fname);
-	if (fsp->fsp_name == NULL) {
-		file_free(req, fsp);
-		return NT_STATUS_NO_MEMORY;
-	}
-	// Set file attributes
-	if (create_options & FILE_DIRECTORY_FILE) {
-		fsp->fsp_name->st.st_ex_mode = S_IFDIR | 0755;
-		fsp->fsp_flags.is_directory = true;
+	if ((create_options & FILE_DIRECTORY_FILE) && (create_disposition == FILE_CREATE)) {
+		DEBUG(0, ("tracim_create_file: custom : %s.\n", fname));
+		// Create files_struct manually (don't use SMB_VFS_NEXT_CREATE_FILE)
+		status = file_new(req, conn, &fsp);
+		if (!NT_STATUS_IS_OK(status)) {
+			DEBUG(0, ("tracim_create_file: file_new failed: %s\n", nt_errstr(status)));
+			return status;
+		}
+		fsp->fsp_flags.is_pathref = true;
+		fsp->fsp_flags.can_read = true;
+		fsp->fsp_flags.can_write = true;
+		// Set up the files_struct
+		fsp->fsp_name = cp_smb_filename(fsp, smb_fname);
+		if (fsp->fsp_name == NULL) {
+			file_free(req, fsp);
+			return NT_STATUS_NO_MEMORY;
+		}
+		// Set file attributes
+		if (create_options & FILE_DIRECTORY_FILE) {
+			fsp->fsp_name->st.st_ex_mode = S_IFDIR | 0755;
+			fsp->fsp_flags.is_directory = true;
+		} else { // useless here
+			fsp->fsp_name->st.st_ex_mode = S_IFREG | 0644;
+			fsp->fsp_flags.is_directory = false;
+		}
+		fsp->mid = req->mid;
+		fsp->share_mode_flags = FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE;
+		// Explicitly allow delete access
+		fsp->access_mask |= DELETE_ACCESS;
+		// tracim_fill_stat(&smb_fname->st, fname, fsp->fsp_flags.is_directory, allocation_size, handle);
+		// tracim_fill_stat(&fsp->fsp_name->st, fname, fsp->fsp_flags.is_directory, allocation_size, handle);
+		// Add to connection's file list
+		fsp->fsp_name->fsp = fsp;
+		fsp->file_id.devid = TRACIM_DEVICE_ID;
+		fsp->file_id.inode = inode;
+		// fsp->file_id.extid = 0;
+		DEBUG(0, ("tracim_create_file: fsp_set_fd() : %s.\n", fname));
+		fsp_set_fd(fsp, fd);
+		vfs_stat_fsp(fsp);
+		// smb_fname->flags |= SMB_FILENAME_POSIX_PATH;
+		// DLIST_ADD(conn->sconn->files, fsp);
+		// conn->num_files_open++;
+		DEBUG(0, ("tracim_create_file: Successfully created file: %s (remote_fd=%d, fsp=%p)\n", fname, fd, fsp));
+		*result = fsp;
+		if (pinfo) {
+			*pinfo = info;
+		}
+		DEBUG(0, ("tracim_create_file: OK : %s.\n", fname));
+		status = SMB_VFS_NEXT_CREATE_FILE(
+			handle, req, dirfsp, smb_fname,
+			access_mask, share_access,
+			create_disposition, create_options,
+			file_attributes, oplock_request,
+			lease,
+			allocation_size, private_flags,
+			sd, ea_list, result,
+			pinfo, in_context_blobs, out_context_blobs);
+		if (NT_STATUS_IS_OK(status)) {
+			return status;
+		}
+		// return NT_STATUS_OK;
 	} else {
-		fsp->fsp_name->st.st_ex_mode = S_IFREG | 0644;
-		fsp->fsp_flags.is_directory = false;
+		DEBUG(0, ("tracim_create_file: call SMB_VFS_NEXT_CREATE_FILE : %s.\n", fname));
+		status = SMB_VFS_NEXT_CREATE_FILE(
+			handle, req, dirfsp, smb_fname,
+			access_mask, share_access,
+			create_disposition, create_options,
+			file_attributes, oplock_request,
+			lease,
+			allocation_size, private_flags,
+			sd, ea_list, result,
+			pinfo, in_context_blobs, out_context_blobs);
+		if (NT_STATUS_IS_OK(status)) {
+			return status;
+		}
 	}
-	tracim_stat(handle, smb_fname);
-	// Add to connection's file list
-	DLIST_ADD(conn->sconn->files, fsp);
-	conn->num_files_open++;
-	DEBUG(0, ("tracim_create_file: Successfully created file: %s (remote_fd=%d, fsp=%p)\n", fname, fd, fsp));
-	*result = fsp;
-	if (pinfo) {
-		*pinfo = info;
-	}
+	DEBUG(0, ("tracim_create_file: ERROR : Fail created file: %s (fd=%d), try force : TODO\n", fname, fd));
+	DEBUG(0, ("tracim_create_file: SMB_VFS_NEXT_CREATE_FILE failed: %s\n", nt_errstr(status)));
+
 	if (share_access==FILE_SHARE_NONE) {
 		DEBUG(0, ("tracim_create_file: Share access NONE : %s.\n", fname));
 	} else if (share_access==FILE_SHARE_READ) {
@@ -1424,22 +1469,99 @@ static NTSTATUS tracim_create_file(struct vfs_handle_struct *handle,
 		DEBUG(0, ("tracim_create_file: Share access DELETE : %s.\n", fname));
 	} else {
 		DEBUG(0, ("tracim_create_file: Share access ALL : %s : %d.\n", fname, share_access));
-	} */
-
-	status = SMB_VFS_NEXT_CREATE_FILE(
-		handle, req, dirfsp, smb_fname,
-		access_mask, share_access,
-		create_disposition, create_options,
-		file_attributes, oplock_request,
-		lease,
-		allocation_size, private_flags,
-		sd, ea_list, result,
-		pinfo, in_context_blobs, out_context_blobs);
-	if (!NT_STATUS_IS_OK(status)) {
-		DEBUG(0, ("tracim_create_file: ERROR : Fail created file: %s (fd=%d), force : TODO\n", fname, fd));
-		DEBUG(0, ("tracim_create_file: SMB_VFS_NEXT_CREATE_FILE failed: %s\n", nt_errstr(status)));
-		return status;
 	}
+
+	// Call next VFS function : Try to use fake folder/files
+	char *temp_path2 = talloc_asprintf(talloc_tos(),
+		"tracim_dir_%d_%s", getpid(), basename((char *)fname));
+	char *temp_path = talloc_asprintf(talloc_tos(),
+		"%s/%s", handle->conn->connectpath, temp_path2);
+	if (create_options & FILE_DIRECTORY_FILE) {
+        // Create a temporary local directory that Samba can stat
+        if (mkdir(temp_path, 0755) == 0 || errno == EEXIST) {
+			DEBUG(0, ("tracim_create_file: Temp directory %s\n", temp_path));
+            char *orig_path = smb_fname->base_name;
+            smb_fname->base_name = temp_path;
+			// fsp->fsp_name->fsp = fsp;
+			data->temp_path = temp_path2;
+            status = SMB_VFS_NEXT_CREATE_FILE(
+                handle, req, dirfsp, smb_fname,
+                access_mask, share_access,
+                create_disposition, create_options,
+                file_attributes, oplock_request,
+                lease, allocation_size, private_flags,
+                sd, ea_list, result,
+                pinfo, in_context_blobs, out_context_blobs
+			);
+            smb_fname->base_name = orig_path;
+            rmdir(temp_path);
+			data->temp_path = NULL;
+        } else {
+			DEBUG(0, ("tracim_create_file: Failed to create temp directory %s: %s\n", temp_path, strerror(errno)));
+			status = NT_STATUS_ACCESS_DENIED;
+		}
+    } else {
+        // For files, create a temporary empty file
+		DEBUG(0, ("tracim_create_file: Temp file %s\n", temp_path));
+        int temp_fd = open(temp_path, O_CREAT | O_RDWR, 0644);
+        if (temp_fd >= 0) {
+            close(temp_fd);
+			smb_fname->flags |= SMB_FILENAME_POSIX_PATH;
+			smb_fname->fsp->fsp_flags.is_pathref = true;
+			smb_fname->fsp->fsp_flags.can_read = true;
+			smb_fname->fsp->fsp_flags.can_write = true;
+			// Successfully created temporary file
+			DEBUG(0, ("tracim_create_file: Temp file created %s\n", temp_path));
+			// Set the file size to allocation_size if specified
+			if (allocation_size > 0) {
+				if (ftruncate(temp_fd, allocation_size) < 0) {
+					DEBUG(0, ("tracim_create_file: Failed to set size for temp file %s: %s\n", temp_path, strerror(errno)));
+					close(temp_fd);
+					unlink(temp_path);
+					return NT_STATUS_ACCESS_DENIED;
+				}
+			}
+			char *orig_path = smb_fname->base_name;
+			data->temp_path = temp_path2;
+            smb_fname->base_name = temp_path2;
+			smb_fname->st.st_ex_ino = path_to_inode(temp_path2);
+			DEBUG(0, ("tracim_create_file: init : %s\n", fsp_str_dbg(smb_fname->fsp)));
+			DEBUG(0, ("tracim_create_file: init1 : %p, %p->%p->%p\n", smb_fname->base_name, smb_fname, smb_fname->fsp, smb_fname->fsp->fsp_name));
+            smb_fname->fsp->fsp_name->base_name = temp_path2;
+			DEBUG(0, ("tracim_create_file: init2 : %s VS %s\n", fsp_str_dbg(smb_fname->fsp), smb_fname->fsp->fsp_name->base_name));
+			DEBUG(0, ("tracim_create_file: init3 : %p->%p->%p\n", smb_fname, smb_fname->fsp, smb_fname->fsp->fsp_name));
+			fd = fsp_get_pathref_fd(smb_fname->fsp);
+			if(fd>0) {
+				fsp_set_fd(smb_fname->fsp, -1);
+				fsp_set_fd(smb_fname->fsp, temp_fd);
+			}
+			DEBUG(0, ("tracim_create_file: SMB_VFS_NEXT_CREATE_FILE\n"));
+            status = SMB_VFS_NEXT_CREATE_FILE(
+                handle, req, dirfsp, smb_fname,
+                access_mask, share_access,
+                create_disposition, create_options,
+                file_attributes, oplock_request,
+                lease, allocation_size, private_flags,
+                sd, ea_list, result,
+                pinfo, in_context_blobs, out_context_blobs);
+			DEBUG(0, ("tracim_create_file: SMB_VFS_NEXT_CREATE_FILE OK\n"));
+			if (NT_STATUS_IS_OK(status)) {
+				smb_fname->base_name = orig_path;
+				smb_fname->fsp->fsp_name->base_name = orig_path;
+				fsp_set_fd(smb_fname->fsp, -1);
+				fsp_set_fd(smb_fname->fsp, fd);
+			} else {
+				DEBUG(0, ("tracim_create_file: SMB_VFS_NEXT_CREATE_FILE failed: %s\n", nt_errstr(status)));
+			}
+            unlink(temp_path);
+			data->temp_path = NULL;
+        } else {
+			DEBUG(0, ("tracim_create_file: Failed to create temp file %s: %s\n", temp_path, strerror(errno)));
+			status = NT_STATUS_ACCESS_DENIED;
+		}
+        TALLOC_FREE(temp_path);
+        TALLOC_FREE(temp_path2);
+    }
 	DEBUG(0, ("tracim_create_file: end\n"));
 	return status;
 }
