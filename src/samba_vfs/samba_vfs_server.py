@@ -184,7 +184,6 @@ class SambaVFSServer:
 					options=request.get("options", 0),
 					attr=request.get("attr", 0),
 					size=request.get("size", 0),
-					is_dir=request.get("dir", 0)==1,
 					fd=request.get("fd", -1)
 				)
 			elif op == "close":

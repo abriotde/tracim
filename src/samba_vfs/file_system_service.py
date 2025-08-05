@@ -262,11 +262,17 @@ class FileSystemService:
 		
 		# Check if file exists and user has permissions
 		file_info = self.get_file_info(path, username)
-		if not file_info.get("exists", False):
+		# flags = 133120 = 0x20800 = O_NONBLOCK|O_LARGEFILE
+		directory_required = (flags & os.O_DIRECTORY)
+		if file_info is None or not file_info.get("exists", False):
 			create_required = (flags & os.O_CREAT)
 			if not create_required:
-				raise FileSystemException("File not found")
+				raise FileSystemException("File not found (Flags : O_DIRECTORY={directory_required}, O_CREAT={create_required}.)")
 			self.create_file(path=path, username=username, disposition=FileDisposition.FILE_CREATE)
+			file_info = self.get_file_info(path, username)
+		if directory_required:
+			if not file_info.get("is_directory", False):
+				raise FileSystemException("Not a directory")
 
 		# Check read/write permissions based on flags
 		read_required = (flags & os.O_RDONLY) or (flags & os.O_RDWR)
@@ -376,7 +382,7 @@ class FileSystemService:
 		}
 
 	def create_file(self, path:str="", user:str="", 
-			options:FileOptions=0, disposition:FileDisposition=0, attr=0, size=0, is_dir=False, fd=-1) -> Dict[str, Any]:
+			options:FileOptions=0, disposition:FileDisposition=0, attr=0, size=0, fd=-1) -> Dict[str, Any]:
 		"""
 		* @param disposition : 
 		* @param options : 
@@ -389,15 +395,18 @@ class FileSystemService:
 				"success": False,
 				"error": "No path given"
 			}
+		is_dir = options & int(FileOptions.FILE_DIRECTORY_FILE) != 0
 		fd = -1
 		path = os.path.normpath(path)
 		file_info = self._files.get(path, None)
 		info = -1
 		exists = file_info is not None
+		inode = 0
 		if file_info is None:
-			if (disposition & int(FileDisposition.FILE_CREATE)) or disposition == FileDisposition.FILE_OVERWRITE_IF:
+			if (disposition & int(FileDisposition.FILE_CREATE) != 0) or (disposition == FileDisposition.FILE_OVERWRITE_IF):
 				exists = True
 				info = FileInfo.FILE_WAS_CREATED
+				inode = hash(path) & 0xFFFFFFFF
 				self._files[path] = {
 					"exists": True,
 					"is_directory": is_dir,
@@ -405,8 +414,10 @@ class FileSystemService:
 					"mtime": int(time.time()),
 					"can_read": True,
 					"can_write": True,
-					"content":""
+					"content": "",
+					"inode": inode
 				}
+				file_info = self._files.get(path, None)
 		if exists and ((options & int(FileDisposition.FILE_OPEN)) or (options & int(FileDisposition.FILE_OVERWRITE))):
 			ok = False
 			if fd>0:
@@ -423,7 +434,6 @@ class FileSystemService:
 						info = FileInfo.FILE_WAS_OVERWRITTEN
 					else:
 						info = FileInfo.FILE_WAS_OPENED
-			is_dir = file_info.get("is_directory", False)
 		
 		retValue = {
 			"success": True,
@@ -431,8 +441,8 @@ class FileSystemService:
 			"info": int(info),
 			"fd": fd,
 		}
-		if fd!=-1:
-			retValue["fd"] = fd
+		if inode>0:
+			retValue["ino"] = inode
 		return retValue
 
 	def lock_file(self, fd, len, pid, start, type:FLockType, whence:FLockWhence):

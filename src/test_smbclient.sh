@@ -52,12 +52,19 @@ cd user_alberic
 rename test.txt test2.txt
 EOF
 			;;
+		mkdir)
+			eval $TEST_CMD <<EOF
+cd user_alberic
+mkdir tutu
+EOF
+			;;
 		all)
 			run cd
 			run get
 			run put
 			run rm
 			run rename
+			run mkdir
 			;;
 		*)
 			echo "NT_STATUS_UNKNOWN_TEST : Unknown command '$cmd'" >test.log

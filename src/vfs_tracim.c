@@ -393,6 +393,7 @@ static int tracim_openat(vfs_handle_struct *handle,
     json_object_set_new(request, "path", json_string(path));
     json_object_set_new(request, "flags", json_integer(how->flags));
     json_object_set_new(request, "mode", json_integer(how->mode));
+    json_object_set_new(request, "resolve", json_integer(how->resolve));
     json_object_set_new(request, "user", json_string(data->user));
     response = send_request(data, request);
     json_decref(request);
@@ -1353,41 +1354,26 @@ static NTSTATUS tracim_create_file(struct vfs_handle_struct *handle,
 	json_object_set_new(request, "size", json_integer(allocation_size));
 	json_object_set_new(request, "attr", json_integer(file_attributes));
 	json_object_set_new(request, "fd", json_integer(fd0));
-	if (create_options & FILE_DIRECTORY_FILE) { // Is directory
-		json_object_set_new(request, "dir", json_integer(1));
-		if (create_disposition == FILE_OPEN_IF) {
-			DEBUG(0, ("tracim_create_file: FILE_DIRECTORY_FILE/FILE_OPEN_IF : %s.\n", fname));
-		} else {
-			DEBUG(0, ("tracim_create_file: FILE_DIRECTORY_FILE/not FILE_OPEN_IF : %s.\n", fname));
-		}
-	} else {
-		json_object_set_new(request, "dir", json_integer(0));
-		DEBUG(0, ("tracim_create_file: SIMPLE_FILE : %s.\n", fname));
-	}
 	json_t *response = send_request(data, request);
 	json_decref(request);
 	if (!response) {
 		return NT_STATUS_ABANDONED;
 	}
 	int fd = -1;
+	int inode = 0;
 	json_t *success_obj = json_object_get(response, "success");
 	if (success_obj && json_is_true(success_obj)) {
 		success_obj = json_object_get(response, "fd");
 		if (success_obj && json_is_integer(success_obj)) {
 			fd = json_integer_value(success_obj);
-			if (fd0!=fd && fd>0) {
-				DEBUG(0, ("tracim_create_file: set fd %d (%d).", fd, fd0));
-				if (fd0>0) {
-					DEBUG(0, ("tracim_create_file: ERROR having ever fd."));
-					fsp_set_fd(smb_fname->fsp, -1); // Set to -1 to close previous fd
-				}
-				fsp_set_fd(smb_fname->fsp, fd);
-			}
 		}
-		// Get creation info
 		success_obj = json_object_get(response, "info");
 		if (success_obj && json_is_integer(success_obj)) {
 			info = json_integer_value(success_obj);
+		}
+		success_obj = json_object_get(response, "ino");
+		if (success_obj && json_is_integer(success_obj)) {
+			inode = json_integer_value(success_obj);
 		}
 	} else {
 		success_obj = json_object_get(response, "error");
@@ -1397,59 +1383,85 @@ static NTSTATUS tracim_create_file(struct vfs_handle_struct *handle,
 		}
 	}
 	json_decref(response);
-	status = SMB_VFS_NEXT_CREATE_FILE(
-		handle, req, dirfsp, smb_fname,
-		access_mask, share_access,
-		create_disposition, create_options,
-		file_attributes, oplock_request,
-		lease,
-		allocation_size, private_flags,
-		sd, ea_list, result,
-		pinfo, in_context_blobs, out_context_blobs);
-	if (NT_STATUS_IS_OK(status)) {
-		return status;
+	if ((create_options & FILE_DIRECTORY_FILE) && (create_disposition == FILE_CREATE)) {
+		DEBUG(0, ("tracim_create_file: custom : %s.\n", fname));
+		// Create files_struct manually (don't use SMB_VFS_NEXT_CREATE_FILE)
+		status = file_new(req, conn, &fsp);
+		if (!NT_STATUS_IS_OK(status)) {
+			DEBUG(0, ("tracim_create_file: file_new failed: %s\n", nt_errstr(status)));
+			return status;
+		}
+		fsp->fsp_flags.is_pathref = true;
+		fsp->fsp_flags.can_read = true;
+		fsp->fsp_flags.can_write = true;
+		// Set up the files_struct
+		fsp->fsp_name = cp_smb_filename(fsp, smb_fname);
+		if (fsp->fsp_name == NULL) {
+			file_free(req, fsp);
+			return NT_STATUS_NO_MEMORY;
+		}
+		// Set file attributes
+		if (create_options & FILE_DIRECTORY_FILE) {
+			fsp->fsp_name->st.st_ex_mode = S_IFDIR | 0755;
+			fsp->fsp_flags.is_directory = true;
+		} else { // useless here
+			fsp->fsp_name->st.st_ex_mode = S_IFREG | 0644;
+			fsp->fsp_flags.is_directory = false;
+		}
+		fsp->mid = req->mid;
+		fsp->share_mode_flags = FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE;
+		// Explicitly allow delete access
+		fsp->access_mask |= DELETE_ACCESS;
+		// tracim_fill_stat(&smb_fname->st, fname, fsp->fsp_flags.is_directory, allocation_size, handle);
+		// tracim_fill_stat(&fsp->fsp_name->st, fname, fsp->fsp_flags.is_directory, allocation_size, handle);
+		// Add to connection's file list
+		fsp->fsp_name->fsp = fsp;
+		fsp->file_id.devid = TRACIM_DEVICE_ID;
+		fsp->file_id.inode = inode;
+		// fsp->file_id.extid = 0;
+		DEBUG(0, ("tracim_create_file: fsp_set_fd() : %s.\n", fname));
+		fsp_set_fd(fsp, fd);
+		vfs_stat_fsp(fsp);
+		// smb_fname->flags |= SMB_FILENAME_POSIX_PATH;
+		// DLIST_ADD(conn->sconn->files, fsp);
+		// conn->num_files_open++;
+		DEBUG(0, ("tracim_create_file: Successfully created file: %s (remote_fd=%d, fsp=%p)\n", fname, fd, fsp));
+		*result = fsp;
+		if (pinfo) {
+			*pinfo = info;
+		}
+		DEBUG(0, ("tracim_create_file: OK : %s.\n", fname));
+		/* status = SMB_VFS_NEXT_CREATE_FILE(
+			handle, req, dirfsp, smb_fname,
+			access_mask, share_access,
+			create_disposition, create_options,
+			file_attributes, oplock_request,
+			lease,
+			allocation_size, private_flags,
+			sd, ea_list, result,
+			pinfo, in_context_blobs, out_context_blobs);
+		if (NT_STATUS_IS_OK(status)) {
+			return status;
+		} */
+		return NT_STATUS_OK;
+	} else {
+		DEBUG(0, ("tracim_create_file: call SMB_VFS_NEXT_CREATE_FILE : %s.\n", fname));
+		status = SMB_VFS_NEXT_CREATE_FILE(
+			handle, req, dirfsp, smb_fname,
+			access_mask, share_access,
+			create_disposition, create_options,
+			file_attributes, oplock_request,
+			lease,
+			allocation_size, private_flags,
+			sd, ea_list, result,
+			pinfo, in_context_blobs, out_context_blobs);
+		if (NT_STATUS_IS_OK(status)) {
+			return status;
+		}
 	}
 	DEBUG(0, ("tracim_create_file: ERROR : Fail created file: %s (fd=%d), try force : TODO\n", fname, fd));
 	DEBUG(0, ("tracim_create_file: SMB_VFS_NEXT_CREATE_FILE failed: %s\n", nt_errstr(status)));
 
-    // Create files_struct manually (don't use SMB_VFS_NEXT_CREATE_FILE)
-    status = file_new(req, conn, &fsp);
-    if (!NT_STATUS_IS_OK(status)) {
-        DEBUG(0, ("tracim_create_file: file_new failed: %s\n", nt_errstr(status)));
-        return status;
-    }
-    // Set up the files_struct
-    fsp->fsp_name = cp_smb_filename(fsp, smb_fname);
-    if (fsp->fsp_name == NULL) {
-        file_free(req, fsp);
-        return NT_STATUS_NO_MEMORY;
-    }
-    // Set file attributes
-    if (create_options & FILE_DIRECTORY_FILE) {
-        fsp->fsp_name->st.st_ex_mode = S_IFDIR | 0755;
-        fsp->fsp_flags.is_directory = true;
-    } else {
-        fsp->fsp_name->st.st_ex_mode = S_IFREG | 0644;
-        fsp->fsp_flags.is_directory = false;
-    }
-	fsp->mid = req->mid;
-    fsp->share_mode_flags = FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE;
-    // Explicitly allow delete access
-    fsp->access_mask |= DELETE_ACCESS;
-    // tracim_fill_stat(&smb_fname->st, fname, fsp->fsp_flags.is_directory, allocation_size, handle);
-    // tracim_fill_stat(&fsp->fsp_name->st, fname, fsp->fsp_flags.is_directory, allocation_size, handle);
-    // Add to connection's file list
-	fsp->fsp_name->fsp = fsp;
-	smb_fname->fsp = fsp;
-	smb_fname->flags |= SMB_FILENAME_POSIX_PATH;
-	tracim_stat(handle, smb_fname);
-    DLIST_ADD(conn->sconn->files, fsp);
-    conn->num_files_open++;
-    DEBUG(0, ("tracim_create_file: Successfully created file: %s (remote_fd=%d, fsp=%p)\n", fname, fd, fsp));
-    *result = fsp;
-    if (pinfo) {
-        *pinfo = info;
-    }
 	if (share_access==FILE_SHARE_NONE) {
 		DEBUG(0, ("tracim_create_file: Share access NONE : %s.\n", fname));
 	} else if (share_access==FILE_SHARE_READ) {
