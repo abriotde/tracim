@@ -33,6 +33,7 @@ class FileDisposition(IntEnum):
 	FILE_OVERWRITE = 4 			# File exists overwrite. File not exist fail.
 	FILE_OVERWRITE_IF = 5 		# File exists overwrite. File not exist create.
 
+# Check smb_constants.h to update these constants.
 class FileOptions(IntEnum):
 	FILE_DIRECTORY_FILE = 0x0001
 	FILE_WRITE_THROUGH = 0x0002
@@ -221,7 +222,9 @@ class SambaVFSTracimContext(TracimContext):
 
 
 class FileSystemService:
-	"""Interface to the actual database operations."""
+	"""
+	File system service for handling file operations for Samba VFS Module.
+	"""
 	
 	def __init__(self, config):
 		"""
@@ -246,7 +249,9 @@ class FileSystemService:
 		return self.get_file_info(finfo.path, username)
 
 	def get_file_info(self, path: str, username: str) -> Dict[str, Any]:
-		"""Get information about a file or directory."""
+		"""
+		Get information about a file or directory.
+		"""
 		# logger.info(self, f"Getting file info for {path} (user: {username})")
 		default_file_infos = {"exists": False}
 		path = os.path.normpath(path)
@@ -257,7 +262,9 @@ class FileSystemService:
 		return file_infos
 
 	def open_file(self, path: str, username: str, flags: int, mode: int, fd: int = 0) -> Dict[str, Any]:
-		"""Open a file and return a file descriptor to it."""
+		"""
+		Open a file and return a file descriptor to it. Used to to create a new file (using flags).
+		"""
 		# logger.info(self, f"Opening file {path} (user: {username}, flags: {flags})")
 		
 		# Check if file exists and user has permissions
@@ -298,7 +305,9 @@ class FileSystemService:
 		return fd
 	
 	def read_file(self, handle: int, size: int) -> Dict[str, Any]:
-		"""Read data from a file."""
+		"""
+		Read data from a file.
+		"""
 		# logger.info(self, f"Reading from handle {handle}, size {size}")
 		
 		file_info = self._file_descriptors.get(handle, None)
@@ -312,15 +321,12 @@ class FileSystemService:
 		data = content[position:position + size]
 		file_info.position += len(data)
 		
-		return {
-			"success": True,
-			"data": data,
-			"size": len(data)
-		}
+		return data
 
 	def unlink(self, path:str, fd:int, flags:int) -> bool:
 		"""
-		TODO : recursive for directories
+		Remove a file or a directory, but keep datas to allow close file later.
+		TODO : recursive for directories ?
 		"""
 		finfo = self._files.get(path, None)
 		if finfo is not None:
@@ -354,18 +360,20 @@ class FileSystemService:
 		return False
 	
 	def write_file(self, handle: int, data: str, size: int, offset:int) -> Dict[str, Any]:
-		"""Write data to a file."""
+		"""
+		Write data to a file.
+		"""
 		# logger.info(self, f"Writing to handle {handle}, size {size}")
 
 		file_info = self._file_descriptors.get(handle, None)
 		if file_info is None:
-			return {"success": False, "error": "Invalid file handle {handle}."}
+			raise FileSystemException("Invalid file handle {handle}.")
 		
 		# Check write permission based on flags
 		flag = file_info.flags
 		write_allowed = (flag & os.O_WRONLY) or (flag & os.O_RDWR)
 		if not write_allowed:
-			return {"success": False, "error": "File not opened for writing"}
+			raise FileSystemException("File not opened for writing")
 
 		# Placeholder implementation
 		position = offset if offset>=0 else file_info.position
@@ -376,14 +384,13 @@ class FileSystemService:
 			file_info.content = content[:position] + data[:size] + content[position + size:]
 		file_info.position = position+size
 		
-		return {
-			"success": True,
-			"size": size
-		}
+		return size
 
 	def create_file(self, path:str="", user:str="", 
 			options:FileOptions=0, disposition:FileDisposition=0, attr=0, size=0, fd=-1) -> Dict[str, Any]:
 		"""
+		Unless it's name, it seam not called to create a file (It's open_file with create options).
+		It is call on creating a new directory environment on client side (after "cd"). It is also called to create a directory.
 		* @param disposition : 
 		* @param options : 
 		* @return:
@@ -436,7 +443,6 @@ class FileSystemService:
 						info = FileInfo.FILE_WAS_OPENED
 		
 		retValue = {
-			"success": True,
 			"size": size,
 			"info": int(info),
 			"fd": fd,
@@ -503,7 +509,9 @@ class FileSystemService:
 		
 
 	def close_file(self, handle: int) -> Dict[str, Any]:
-		"""Close a file handle."""
+		"""
+		Close a file descriptor.
+		"""
 		if handle not in self._file_descriptors:
 			raise FileSystemException("Invalid file handle")
 		file_info = self._file_descriptors.pop(handle)
@@ -515,7 +523,9 @@ class FileSystemService:
 		return True
 
 	def open_directory(self, path: str, username: str, mask: str) -> Dict[str, Any]:
-		"""Open a directory for reading."""
+		"""
+		Open a directory for listing containing files. 
+		"""
 		# logger.info(self, f"Opening directory {path} (user: {username})")
 		
 		# Check if directory exists and user has permissions
@@ -526,10 +536,8 @@ class FileSystemService:
 			raise FileSystemException("Not a directory")
 		if not dir_info.get("can_read", False):
 			raise FileSystemException("Permission denied")
-
 		fd = self._next_fd
 		self._next_fd += 1
-		
 		# workspace = self._get_workspace(username)
 		# files = workspace.get_member_list()
 		# logger.info(self, f"workspace files : {files}")
@@ -554,17 +562,20 @@ class FileSystemService:
 		return fd
 	
 	def read_directory(self, handle: int) -> Dict[str, Any]:
-		"""Read the next entry from a directory."""
+		"""
+		Read the next entry from a directory.
+		No need to change it for Tracim.
+		"""
 		# logger.info(self, f"Reading from directory handle {handle}")
 		if handle not in self._file_descriptors:
-			return {"success": False, "error": "Invalid directory handle"}
+			raise FileSystemException("Invalid directory handle")
 		dir_info = self._file_descriptors[handle]
 		entries = dir_info.entries
 		position = dir_info.position
 		# logger.info(self, f"read_directory(fd={handle}) : entries={entries}, position={position}")
 		if position >= len(entries):
-			return {"success": False, "error": "No more entries"}
-		
+			raise FileSystemException("No more entries")
+
 		# Get next entry
 		entry_name = entries[position]
 		dir_info.position = position+1
@@ -575,11 +586,9 @@ class FileSystemService:
 		entry_type = 4 if entry_info.get("is_directory", False) else 8  # DT_DIR = 4, DT_REG = 8
 		inode = entry_info.get("inode", False)
 		return {
-			"success": True,
 			"name": entry_name,
 			"type": entry_type,
 			"ino": inode,
-			"path": entry_path,
 		}
 	
 	def close_directory(self, handle: int) -> Dict[str, Any]:
@@ -590,7 +599,7 @@ class FileSystemService:
 		# Clean up handle
 		dir_info = self._file_descriptors.pop(handle)
 		# logger.info(self, f"Closed directory {dir_info.path}")
-		return {"success":True, "handle":handle}
+		return True
 
 	def xattr_file(self, user, path, name, value=None):
 		"""
@@ -608,6 +617,7 @@ class FileSystemService:
 
 	def truncate(self, user="", fd=0):
 		"""
+		Truncate a file to zero length.
 		"""
 		finfo = self._file_descriptors.get(fd, None)
 		if finfo is None:
@@ -617,6 +627,8 @@ class FileSystemService:
 
 	def allocate(self, user, fd, offset=0, len=0):
 		"""
+		Allocate space for a file.
+		No need to change it for Tracim?
 		"""
 		finfo = self._file_descriptors.get(fd, None)
 		if finfo is None:
@@ -624,7 +636,9 @@ class FileSystemService:
 		return True
 
 	def init_connection(self, service:str, user:str, mount_point:str="/") -> Dict[str, Any]:
-		"""Initialize a new connection."""
+		"""
+		Initialize a new connection.
+		"""
 		logger.info(self, f"Initializing connection for service {service}, user {user}")
 		
 		# This is where you'd call your actual database library to set up the connection
@@ -686,10 +700,11 @@ class FileSystemService:
 		for path, f in self._files.items():
 			f["inode"] = hash(path) & 0xFFFFFFFF
 			f["path"] = path
-		return {"success": True, "connection_id": conn_id}
+		return conn_id
 
 	def _get_workspace(self, username:str):
 		"""
+		Get the workspace for a user.
 		"""
 		conn_id = self.active_users.get(username)
 		if conn_id is None:
@@ -700,12 +715,13 @@ class FileSystemService:
 		return connection.workspace
 
 	def disconnect(self, conn_id: Optional[int] = None) -> Dict[str, Any]:
-		"""Close a connection."""
+		"""
+		Close a connection.
+		"""
 		logger.info(self, f"Disconnecting connection {conn_id}")
 
 		infos = self.active_connections.get(conn_id, None)
 		if infos is not None:
 			self.active_connections.pop(conn_id)
 			self.active_users.pop(infos["user"])
-		
-		return {"success": True}
+		return True

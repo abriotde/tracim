@@ -123,13 +123,13 @@ class SambaVFSServer:
 		logger.debug(self, f"Processing request: {op} : {request}")
 		try:
 			if op == "init":
-				return self._fs_service.init_connection(
+				result = { "connection_id": self._fs_service.init_connection(
 					request.get("service", ""),
 					request.get("user", ""),
 					mount_point=request.get("mount", "/")
-				)
+				)}
 			elif op == "disconnect":
-				return self._fs_service.disconnect()
+				result = self._fs_service.disconnect()
 			elif op == "stat":
 				path = request.get("path", "")
 				user = request.get("user", "")
@@ -165,19 +165,23 @@ class SambaVFSServer:
 					fd=request.get("fd", 0)
 				)}
 			elif op == "read":
-				return self._fs_service.read_file(
+				data = self._fs_service.read_file(
 					request.get("fd", -1),
 					request.get("size", 0)
 				)
+				result = {
+					"data": data,
+					"size": len(data)
+				}
 			elif op == "write":
-				return self._fs_service.write_file(
+				result = { "size": self._fs_service.write_file(
 					request.get("fd", -1),
 					request.get("data", ""),
 					request.get("size", 0),
 					request.get("offset", 0)
-				)
+				)}
 			elif op == "create":
-				return self._fs_service.create_file(
+				result = self._fs_service.create_file(
 					path=request.get("path", ""),
 					user=request.get("user", ""),
 					disposition=request.get("disposition", 0),
@@ -197,11 +201,11 @@ class SambaVFSServer:
 					request.get("mask", "")
 				)}
 			elif op == "readdir":
-				return self._fs_service.read_directory(
+				result = self._fs_service.read_directory(
 					request.get("handle", -1)
 				)
 			elif op == "closedir":
-				return self._fs_service.close_directory(
+				result = self._fs_service.close_directory(
 					request.get("handle", -1)
 				)
 			elif op == "unlink":
