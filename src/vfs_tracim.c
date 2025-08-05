@@ -1431,7 +1431,7 @@ static NTSTATUS tracim_create_file(struct vfs_handle_struct *handle,
 			*pinfo = info;
 		}
 		DEBUG(0, ("tracim_create_file: OK : %s.\n", fname));
-		/* status = SMB_VFS_NEXT_CREATE_FILE(
+		status = SMB_VFS_NEXT_CREATE_FILE(
 			handle, req, dirfsp, smb_fname,
 			access_mask, share_access,
 			create_disposition, create_options,
@@ -1442,8 +1442,8 @@ static NTSTATUS tracim_create_file(struct vfs_handle_struct *handle,
 			pinfo, in_context_blobs, out_context_blobs);
 		if (NT_STATUS_IS_OK(status)) {
 			return status;
-		} */
-		return NT_STATUS_OK;
+		}
+		// return NT_STATUS_OK;
 	} else {
 		DEBUG(0, ("tracim_create_file: call SMB_VFS_NEXT_CREATE_FILE : %s.\n", fname));
 		status = SMB_VFS_NEXT_CREATE_FILE(
