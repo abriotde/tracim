@@ -23,10 +23,15 @@ function run() {
 			usage
 			exit 0
 			;;
+		ls)
+			eval $TEST_CMD <<EOF
+ls
+EOF
+		;;
 		cd)
 			eval $TEST_CMD <<EOF
 cd user_alberic
-ls 
+ls
 EOF
 			;;
 		get)
@@ -59,6 +64,7 @@ mkdir tutu
 EOF
 			;;
 		all)
+			run ls
 			run cd
 			run get
 			run put

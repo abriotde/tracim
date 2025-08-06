@@ -138,23 +138,17 @@ class SambaVFSServer:
 				else:
 					fd = request.get("fd", -1)
 					file_info = self._fs_service.get_file_info_fd(fd, user)
-				
-				if not file_info.get("exists", False):
-					logger.warning(self, f"process_request(stat) : File not found: {request.get('path', '')}")
-					return {"success": False, "error": "File not found"}
+				if file_info is None:
+					raise FileSystemException("File not found.")
 				# logger.warning(self, f"process_request(stat) : File = {file_info}")
-				is_dir = file_info.get("is_directory", False)
-				mode = file_info.get("mode", (0o755 if is_dir else 0o644))
-				mtime = file_info.get("mtime", int(time.time()))
-				return {
-					"success": True,
-					"size": file_info.get("size", 0),
-					"is_dir": is_dir,
-					"mode": mode,
-					"mtime": file_info.get("mtime", int(time.time())),
-					"ctime": file_info.get("ctime", mtime),
-					"atime": file_info.get("atime", mtime),
-					"inode": file_info.get("inode", hash(path)),
+				result = {
+					"size": file_info.size,
+					"is_dir": file_info.is_directory,
+					"mode": file_info.mode,
+					"mtime": file_info.mtime,
+					"ctime": file_info.ctime,
+					"atime": file_info.atime,
+					"inode": file_info.inode,
 				}
 			elif op == "open":
 				result = {"fd": self._fs_service.open_file(
@@ -229,7 +223,8 @@ class SambaVFSServer:
 						src=request.get("src", ""),
 						dst=request.get("dst", ""),
 						srcfd=request.get("srcfd", 0),
-						dstfd=request.get("dstfd", 0)
+						dstfd=request.get("dstfd", 0),
+						username=request.get("user", "")
 					)
 			elif op == "xattr":
 					result = self._fs_service.xattr_file(

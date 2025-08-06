@@ -7,24 +7,34 @@ from enum import Enum, IntEnum
 from dataclasses import dataclass, field
 from pluggy import PluginManager
 from pathlib import Path
+import transaction
+from wsgidav.dav_provider import DAVCollection
+from wsgidav.dav_provider import DAVNonCollection
+from wsgidav.dav_provider import _DAVResource
 from tracim_backend.config import CFG
 from tracim_backend.exceptions import NotAuthenticated
 from tracim_backend.models.tracim_session import TracimSession
 from tracim_backend.models.auth import User
-from tracim_backend.models.data import Content
-from tracim_backend.models.data import Workspace
-from tracim_backend.lib.core.user import UserApi
-from tracim_backend.lib.utils.logger import logger
-from tracim_backend.lib.utils.request import TracimContext
-from tracim_backend.lib.webdav.resources import WorkspaceAndContentContainer
-from tracim_backend.lib.webdav.dav_provider import (
-	ProcessedWebdavPath, TracimDavProvider
+from tracim_backend.models.data import (
+	Content, Workspace
 )
-import transaction
 from tracim_backend.models.setup_models import (
 	create_dbsession_for_context, get_engine, get_session_factory
 )
+from tracim_backend.lib.core.user import UserApi
+from tracim_backend.lib.core.content import ContentApi
 from tracim_backend.lib.core.plugins import init_plugin_manager
+from tracim_backend.lib.utils.logger import logger
+from tracim_backend.lib.utils.request import TracimContext
+from tracim_backend.lib.webdav.resources import (
+	WorkspaceAndContentContainer,
+	FolderResource,
+	FileResource,
+	RootResource
+)
+from tracim_backend.lib.webdav.dav_provider import (
+	ProcessedWebdavPath, TracimDavProvider
+)
 from tracim_backend.tests.utils import WedavEnvironFactory
 from tracim_backend.tests.utils import UserApiFactory
 
@@ -37,9 +47,11 @@ from .file_system_service import (
 	FLockWhence,
 	FLock,
 	FileSystemService,
-	SambaVFSSession
+	SambaVFSSession,
+	SambaVFSFileHandler,
+	SambaVFSFile
 )
-
+from pathlib import PurePath
 
 class SambaVFSTracimSession(TracimSession):
 	"""
@@ -170,7 +182,30 @@ class TracimFileSystemService(FileSystemService):
 		"""
 		Get information about a file or directory. Owner, rights, group, file type(folder, link)
 		"""
-		return super().get_file_info(path=path, username=username)
+		if path in [self.mount_point, "."]:
+			path="/"
+		session = self.get_session(username)
+		filelist = PurePath(path).parts
+		if len(filelist) == 0 or filelist[0]=="":
+			fileresource = session
+		else:
+			fileresource = session.provider.get_resource_inst(
+				path,
+				session.environ,
+			)
+		if fileresource is None:
+			raise FileSystemException("File not found ({filelist}).")
+		logger.info(self, f"File resource : {fileresource} ({filelist})")
+		logger.debug(self, f"get_file_info: {path} for user {username}")
+		if isinstance(fileresource, FolderResource) \
+				or isinstance(fileresource, RootResource) \
+				or fileresource==session:
+			is_dir = True
+		elif isinstance(fileresource, FileResource):
+			is_dir = False
+		else:
+			is_dir = False
+		return SambaVFSFile(path=path, is_directory=is_dir)
 
 	def open_file(self, path: str, username: str, flags: int, mode: int, fd: int = 0) -> Dict[str, Any]:
 		"""
@@ -215,26 +250,11 @@ class TracimFileSystemService(FileSystemService):
 			offset=offset
 		)
 
-	def create_file(self, path:str="", user:str="", 
-			options:FileOptions=0, disposition:FileDisposition=0, attr=0, size=0, fd=-1) -> Dict[str, Any]:
+	def create_real_file(self, path:str="", user:str="", is_directory:bool=False):
 		"""
-		Unless it's name, it seam not called to create a file (It's open_file with create options).
-		It is call on creating a new directory environment on client side (after "cd"). It is also called to create a directory.
-		* @param disposition : 
-		* @param options : 
-		* @return:
-		 * info:FileInfo
-		 * fd : File descriptor of the opened file (if asked).
+		TODO
 		"""
-		return super().create_file(
-			path=path,
-			user=user,
-			options=options,
-			disposition=disposition,
-			attr=attr,
-			size=size,
-			fd=fd
-		)
+		return True
 
 	def lock_file(self, fd, len, pid, start, type:FLockType, whence:FLockWhence):
 		"""
@@ -249,7 +269,7 @@ class TracimFileSystemService(FileSystemService):
 			whence=whence
 		)
 	
-	def rename_file(self, src:str, dst:str, srcfd:int, dstfd:int):
+	def rename_file(self, src:str, dst:str, srcfd:int, dstfd:int, username:str):
 		"""
 		Could be used to rename a file or directory.
 		"""
@@ -274,11 +294,19 @@ class TracimFileSystemService(FileSystemService):
 		"""
 		Open a directory for listing containing files. 
 		"""
-		return super().open_directory(
+		session = self.get_session(username)
+		# TODO go to path
+		entries = session.get_member_names()
+		fd = self._next_fd
+		self._next_fd += 1
+		self._file_descriptors[fd] = SambaVFSFileHandler(
 			path=path,
 			username=username,
-			mask=mask
+			mask=mask,
+			entries=entries,
+			position= 0
 		)
+		return fd
 	
 	def close_directory(self, handle: int) -> Dict[str, Any]:
 		"""Close a directory handle."""
@@ -317,8 +345,6 @@ class TracimFileSystemService(FileSystemService):
 		
 		# Placeholder
 		self.mount_point = os.path.normpath(mount_point)
-		conn_id = self._next_fd
-		self._next_fd += 1
 		# middleware.py : TracimEnv.__call__(self, environ, start_response)
 		# session = SambaVFSTracimSession(service, user, time.time(), None, args=self._args, kwargs=self._kwargs)
 		tracim_context = SambaVFSTracimContext(self.config, user="TheAdmin") # TODO User is set in hardcoded to 'TheAdmin' should be 'user'
@@ -328,7 +354,7 @@ class TracimFileSystemService(FileSystemService):
 			session_factory, transaction.manager, tracim_context
 		)
 		tracim_context.dbsession = dbsession
-		path = "/" # TODO : Set the path to "/" ?
+		path = "" # TODO : Set the path to "/" ?
 		tracim_context.set_path(path)
 		webdav_provider = TracimDavProvider(app_config=self.config, manage_locks=False)
 		user_api = UserApi(
@@ -336,7 +362,7 @@ class TracimFileSystemService(FileSystemService):
             config=self.config,
             current_user=None,
         )
-		admin_user = user_api.get_one_by_email("admin@admin.admin")
+		admin_user = user_api.get_one_by_login("admin@admin.admin")
 		webdav_environ_factory = WedavEnvironFactory(
 			provider=webdav_provider,
 			session=dbsession,
@@ -348,44 +374,24 @@ class TracimFileSystemService(FileSystemService):
 			"/",
 			environ=environ
 		)
-		children = root.get_member_list()
-		logger.info(self, f"Root children: {children}")
-
-		# ERROR : resources.py, line 480 : workspace=None
-		# tracim_context.current_workspace return NULL due to no workspaces after set_path()... Why?
-		# workspace_container = WorkspaceAndContentContainer(
-		# 	path=path,
-		# 	environ=environ,
-		# 	label="",
-		# 	content=None,
-		# 	workspace=tracim_context.current_workspace,
-		# 	provider=webdav_provider,
-		# 	tracim_context=tracim_context
+		children = root.get_member_list() # WorkspaceResource(DAVCollection) list : https://wsgidav.readthedocs.io/en/latest/_autosummary/wsgidav.dav_provider.DAVCollection.html
+		# content_api = ContentApi(
+		# 	session=dbsession,
+		# 	config=self.config,
+		# 	current_user=admin_user,
+		# 	show_active=True,
+		# 	show_deleted=False,
+		# 	show_archived=False,
 		# )
-		self._active_connections[conn_id] = root
-		self._active_users[username] = conn_id
+		workspace_container = WorkspaceAndContentContainer(
+			path=path,
+			environ=environ,
+			label="",
+			content=None,
+			workspace=children[0].workspace if children else None,  # Use first child as workspace if exists
+			provider=webdav_provider,
+			tracim_context=tracim_context
+		)
+		conn_id = self.set_session(username, workspace_container)
+		logger.info(self, f"Session initialized: {conn_id} for user {username} on service {service}")
 		return conn_id
-
-	def _get_workspace(self, username:str):
-		"""
-		Get the workspace for a user.
-		"""
-		conn_id = self.active_users.get(username)
-		if conn_id is None:
-			return None
-		connection = self.active_connections.get(conn_id)
-		if connection is None:
-			return None
-		return connection.workspace
-
-	def disconnect(self, conn_id: Optional[int] = None) -> Dict[str, Any]:
-		"""
-		Close a connection.
-		"""
-		logger.info(self, f"Disconnecting connection {conn_id}")
-
-		infos = self.active_connections.get(conn_id, None)
-		if infos is not None:
-			self.active_connections.pop(conn_id)
-			self.active_users.pop(infos["user"])
-		return True

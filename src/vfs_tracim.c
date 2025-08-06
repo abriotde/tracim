@@ -671,6 +671,7 @@ static int tracim_renameat(vfs_handle_struct *handle,
     }
     request = json_object();
     json_object_set_new(request, "op", json_string("rename"));
+	json_object_set_new(request, "user", json_string(data->user));
     json_object_set_new(request, "src", json_string(src));
     json_object_set_new(request, "dst", json_string(dst));
 	json_object_set_new(request, "srcfd", json_integer(srcfd));

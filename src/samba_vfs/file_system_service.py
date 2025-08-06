@@ -14,6 +14,56 @@ class FileSystemException(Exception):
 		super().__init__(message)
 		self.message = message
 
+class SambaVFSFile:
+	def __init__(self, is_directory, path="", 
+			mtime=None, atime=None, ctime=None, can_read=True, can_write=True,
+			content="", size=16, xattr=None):
+		self.exists = True
+		self.is_directory = is_directory
+		self.size = size
+		if ctime is None:
+			if mtime is not None:
+				ctime = mtime
+			elif atime is not None:
+				ctime = atime
+			else:
+				ctime = int(time.time())
+		self.ctime = ctime # Create time
+		if mtime is None:
+			mtime = ctime
+		self.mtime = mtime # Modify time
+		if atime is None:
+			atime = mtime
+		self.atime = atime # Access time
+		self.can_read = can_read
+		self.can_write = can_write
+		mode = 0o755 if is_directory else 0o644
+		self.mode = mode
+		self.content = content
+		if xattr is None:
+			xattr = {}
+		self.xattr = xattr
+		self.inode = hash(path) & 0xFFFFFFFF
+
+	def set_path(self, path):
+		self.path = path
+		self.inode = hash(path) & 0xFFFFFFFF
+
+	def toDict(self):
+		return {
+			"path" : self.path,
+			"exists" : self.exists,
+			"is_directory" : self.is_directory,
+			"size" : self.size,
+			"mtime" : self.mtime,
+			"can_read" : self.can_read,
+			"can_write" : self.can_write,
+			"content" : self.content,
+			"xattr" : self.xattr,
+			"inode" : self.inode
+		}
+
+
 # Check smb_constants.h to update these constants.
 class FileDisposition(IntEnum):
 	FILE_SUPERSEDE = 0 			# File exists overwrite/supersede. File not exist create.
@@ -126,6 +176,7 @@ class SambaVFSFileHandler:
 	position:int = 0
 	content:str = b"" # Case file: binary content
 	mask:int = 0
+	data:object = None
 	entries:list[str] = field(default_factory=lambda: []) # Case dir: list of files
 
 class FileSystemService:
@@ -142,7 +193,7 @@ class FileSystemService:
 		self.db = None  # Placeholder - replace with your actual DB connection
 		logger.info(self, "Tracim file service initialized")
 		self._file_descriptors:Dict[int, SambaVFSFileHandler] = {}  # Store open file handles
-		self._active_connections:Dict[int, SambaVFSSession] = {}  # Store active connections
+		self._active_sessions:Dict[int, SambaVFSSession] = {}  # Store active connections
 		self._active_users:Dict[str, int] = {} # Index connection's id by username.
 		self._next_fd = 1  # Incremental ID for file and directory handles, do not use 0 as it can be confused to NULL in C VFS cast.
 		self.config = config
@@ -163,11 +214,12 @@ class FileSystemService:
 		Get information about a file or directory. Owner, rights, group, file type(folder, link)
 		"""
 		# logger.info(self, f"Getting file info for {path} (user: {username})")
-		default_file_infos = {"exists": False}
 		path = os.path.normpath(path)
 		if path in [self.mount_point, "/"]:
 			path="."
-		file_infos = self._files.get(path, default_file_infos)
+		file_infos = self._files.get(path, None)
+		if file_infos is None or not file_infos.exists:
+			raise FileSystemException("File not found")
 		# logger.info(self, f"file_infos: {file_infos}")
 		return file_infos
 
@@ -181,22 +233,22 @@ class FileSystemService:
 		file_info = self.get_file_info(path, username)
 		# flags = 133120 = 0x20800 = O_NONBLOCK|O_LARGEFILE
 		directory_required = (flags & os.O_DIRECTORY)
-		if file_info is None or not file_info.get("exists", False):
+		if file_info is None or not file_info.exists:
 			create_required = (flags & os.O_CREAT)
 			if not create_required:
 				raise FileSystemException("File not found (Flags : O_DIRECTORY={directory_required}, O_CREAT={create_required}.)")
 			self.create_file(path=path, username=username, disposition=FileDisposition.FILE_CREATE)
 			file_info = self.get_file_info(path, username)
 		if directory_required:
-			if not file_info.get("is_directory", False):
+			if not file_info.is_directory:
 				raise FileSystemException("Not a directory")
 
 		# Check read/write permissions based on flags
 		read_required = (flags & os.O_RDONLY) or (flags & os.O_RDWR)
 		write_required = (flags & os.O_WRONLY) or (flags & os.O_RDWR)
-		if read_required and not file_info.get("can_read", False):
+		if read_required and not file_info.can_read:
 			raise FileSystemException("Permission denied (read)")
-		if write_required and not file_info.get("can_write", False):
+		if write_required and not file_info.can_write:
 			raise FileSystemException("Permission denied (write)")
 
 		# Placeholder - store file info for later operations
@@ -210,7 +262,7 @@ class FileSystemService:
 			flags=flags,
 			mode=mode,
 			position=0,
-			content=file_info.get("content", "")
+			content=file_info.content
 		)
 		return fd
 	
@@ -240,7 +292,7 @@ class FileSystemService:
 		"""
 		finfo = self._files.get(path, None)
 		if finfo is not None:
-			finfo["todel"] = True
+			finfo.exists = False
 			self.check_del(finfo)
 		return True
 
@@ -249,9 +301,9 @@ class FileSystemService:
 		Delete a file or directory if it is marked for deletion and all fd are closed.
 		"""
 		# Check if file is marked for deletion
-		if finfo.get("todel", False):
+		if not finfo.exists:
 			# Check open files
-			path = finfo.get("path", "")
+			path = finfo.path
 			for i, file_info in self._file_descriptors.items():
 				if file_info.path == path:
 					return False
@@ -296,6 +348,12 @@ class FileSystemService:
 		
 		return size
 
+	def create_real_file(self, path:str="", user:str="", is_directory:bool=False):
+		self._files[path] = SambaVFSFile(
+			path=path,
+			is_directory=is_directory
+		)
+
 	def create_file(self, path:str="", user:str="", 
 			options:FileOptions=0, disposition:FileDisposition=0, attr=0, size=0, fd=-1) -> Dict[str, Any]:
 		"""
@@ -308,33 +366,21 @@ class FileSystemService:
 		 * fd : File descriptor of the opened file (if asked).
 		"""
 		if path=="":
-			return {
-				"success": False,
-				"error": "No path given"
-			}
+			raise FileSystemException("No path given")
 		is_dir = options & int(FileOptions.FILE_DIRECTORY_FILE) != 0
 		fd = -1
 		path = os.path.normpath(path)
-		file_info = self._files.get(path, None)
+		file_info = self.get_file_info(path, user)
 		info = -1
 		exists = file_info is not None
-		inode = 0
 		if file_info is None:
 			if (disposition & int(FileDisposition.FILE_CREATE) != 0) or (disposition == FileDisposition.FILE_OVERWRITE_IF):
 				exists = True
 				info = FileInfo.FILE_WAS_CREATED
-				inode = hash(path) & 0xFFFFFFFF
-				self._files[path] = {
-					"exists": True,
-					"is_directory": is_dir,
-					"size": size,
-					"mtime": int(time.time()),
-					"can_read": True,
-					"can_write": True,
-					"content": "",
-					"inode": inode
-				}
-				file_info = self._files.get(path, None)
+				self.create_real_file(path, user, is_directory=is_dir)
+				file_info = self.get_file_info(path, user)
+			else:
+				raise FileSystemException(f"No such file : {path}.")
 		if exists and ((options & int(FileDisposition.FILE_OPEN)) or (options & int(FileDisposition.FILE_OVERWRITE))):
 			ok = False
 			if fd>0:
@@ -351,14 +397,12 @@ class FileSystemService:
 						info = FileInfo.FILE_WAS_OVERWRITTEN
 					else:
 						info = FileInfo.FILE_WAS_OPENED
-		
 		retValue = {
 			"size": size,
 			"info": int(info),
 			"fd": fd,
+			"ino": file_info.inode
 		}
-		if inode>0:
-			retValue["ino"] = inode
 		return retValue
 
 	def lock_file(self, fd, len, pid, start, type:FLockType, whence:FLockWhence):
@@ -386,7 +430,7 @@ class FileSystemService:
 		lock_infos.whence = whence
 		return lock_infos
 	
-	def rename_file(self, src:str, dst:str, srcfd:int, dstfd:int):
+	def rename_file(self, src:str, dst:str, srcfd:int, dstfd:int, username:str):
 		"""
 		Could be used to rename a file or directory.
 		"""
@@ -401,13 +445,16 @@ class FileSystemService:
 		else:
 			dst_fdinfo = src_fdinfo
 		dstpath = str(Path(dst_fdinfo.path) / dst)
-		src_finfo = self._files.get(srcpath, None)
-		if src_finfo is None:
+		try:
+			src_finfo = self.get_file_info(srcpath, username)
+		except FileSystemException as e:
 			raise FileSystemException("Source file not found ({srcpath}).")
-		dst_finfo = self._files.get(dstpath, None)
-		src_finfo["inode"] = hash(dstpath) & 0xFFFFFFFF
-		if dst_finfo is not None:
+		try:
+			dst_finfo = self.get_file_info(dstpath, username)
 			raise FileSystemException("Can't rename {src}, destination file path ever exists ({dst}). Erase it?")
+		except FileSystemException as e:
+			pass
+		src_finfo.set_path(dstpath)
 		logger.info(self, f"Renaming file {srcpath} to {dstpath}")
 		self._files[dstpath] = src_finfo
 		# Change file path from all open
@@ -427,7 +474,7 @@ class FileSystemService:
 		file_info = self._file_descriptors.pop(handle)
 		file = self._files.get(file_info.path, None)
 		if file is not None:
-			file["content"] = file_info.content
+			file.content = file_info.content
 			self.check_del(file)
 		logger.info(self, f"Closed file {handle} : {file_info.path}")
 		return True
@@ -440,14 +487,12 @@ class FileSystemService:
 		
 		# Check if directory exists and user has permissions
 		dir_info = self.get_file_info(path, username)
-		if not dir_info.get("exists", False):
+		if dir_info is None or not dir_info.exists:
 			raise FileSystemException("Directory not found")
-		if not dir_info.get("is_directory", False):
+		if not dir_info.is_directory:
 			raise FileSystemException("Not a directory")
-		if not dir_info.get("can_read", False):
+		if not dir_info.can_read:
 			raise FileSystemException("Permission denied")
-		fd = self._next_fd
-		self._next_fd += 1
 		# workspace = self._get_workspace(username)
 		# files = workspace.get_member_list()
 		# logger.info(self, f"workspace files : {files}")
@@ -458,15 +503,17 @@ class FileSystemService:
 			path=""
 		for fpath, finfo in self._files.items():
 			fpath_parent = os.path.dirname(fpath)
-			if finfo.get("todel", False):
+			if not finfo.exists:
 				continue
 			if fpath_parent==path and path not in [".",".."]:
 				entries.append(os.path.basename(fpath))
+		fd = self._next_fd
+		self._next_fd += 1
 		self._file_descriptors[fd] = SambaVFSFileHandler(
-			path= path,
-			username= username,
-			mask= mask,
-			entries= entries,
+			path=path,
+			username=username,
+			mask=mask,
+			entries=entries,
 			position= 0
 		)
 		return fd
@@ -493,8 +540,8 @@ class FileSystemService:
 		# Determine entry type
 		entry_path = os.path.join(dir_info.path, entry_name)
 		entry_info = self.get_file_info(entry_path, dir_info.username)
-		entry_type = 4 if entry_info.get("is_directory", False) else 8  # DT_DIR = 4, DT_REG = 8
-		inode = entry_info.get("inode", False)
+		entry_type = 4 if entry_info.is_directory else 8  # DT_DIR = 4, DT_REG = 8
+		inode = entry_info.inode
 		return {
 			"name": entry_name,
 			"type": entry_type,
@@ -518,7 +565,7 @@ class FileSystemService:
 		finfo = self._files.get(path, None)
 		if finfo is None:
 			raise FileSystemException("No such file {path}")
-		xattrs = finfo.get("xattr", {})
+		xattrs = finfo.xattr
 		if value is None:
 			return {"value":xattrs.get(name, "")}
 		else:
@@ -559,69 +606,66 @@ class FileSystemService:
 		conn_id = self._next_fd
 		self._next_fd += 1
 		session = SambaVFSSession(service, user, time.time(), None)
-		self._active_connections[conn_id] = session
+		self._active_sessions[conn_id] = session
 		self._active_users[user] = conn_id
 		self._files = {
-			".": {
-				"exists": True,
-				"is_directory": True,
-				"size": 16,
-				"mtime": int(time.time()),
-				"can_read": True,
-				"can_write": True,
-			},
-			f"user_{user}" : {
-				"exists": True,
-				"is_directory": True,
-				"size": 16,
-				"mtime": int(time.time()),
-				"can_read": True,
-				"can_write": True
-			},
-			f"user_{user}/test.txt" : {
-				"exists": True,
-				"is_directory": False,
-				"size": 1324,
-				"mtime": int(time.time()),
-				"can_read": True,
-				"can_write": True,
-				"content": "Hello, world!"
-			},
-			f"user_{user}/docs" : {
-				"exists": True,
-				"is_directory": False,
-				"size": 1324,
-				"mtime": int(time.time()),
-				"can_read": True,
-				"can_write": True,
-				"content": "My docs!"
-			}
+			".": SambaVFSFile(
+				is_directory=True,
+				size=16
+			),
+			f"user_{user}" : SambaVFSFile(
+				is_directory=True,
+				size=16
+			),
+			f"user_{user}/test.txt" : SambaVFSFile(
+				is_directory=False,
+				size=1324,
+				content="Hello, world!"
+			),
+			f"user_{user}/docs" : SambaVFSFile(
+				is_directory=False,
+				size=1324,
+				content="My docs!"
+			)
 		}
 		for path, f in self._files.items():
-			f["inode"] = hash(path) & 0xFFFFFFFF
-			f["path"] = path
+			f.set_path(path)
 		return conn_id
 
-	def _get_workspace(self, username:str):
+	def get_session(self, username:str):
 		"""
-		Get the workspace for a user.
+		Get the session for a user.
 		"""
 		conn_id = self._active_users.get(username)
 		if conn_id is None:
 			return None
-		connection = self._active_connections.get(conn_id)
+		connection = self._active_sessions.get(conn_id)
 		if connection is None:
 			return None
-		return connection.workspace
+		return connection
 
-	def disconnect(self, conn_id: Optional[int] = None) -> Dict[str, Any]:
+	def set_session(self, username:str, session):
+		"""
+		Get the session for a user.
+		# TODO : Add multi-session by user.
+		"""
+		conn_id = self._active_users.get(username)
+		if conn_id is not None:
+			self.disconnect(username)
+		else:
+			conn_id = self._next_fd
+			self._next_fd += 1
+		self._active_sessions[conn_id] = session
+		self._active_users[username] = conn_id
+		return conn_id
+
+	def disconnect(self, username) -> Dict[str, Any]:
 		"""
 		Close a connection.
 		"""
-		logger.info(self, f"Disconnecting connection {conn_id}")
-
-		infos = self._active_connections.get(conn_id, None)
-		if infos is not None:
-			self._active_connections.pop(conn_id)
-			self._active_users.pop(infos["user"])
+		logger.info(self, f"Disconnecting connection {username}")
+		conn_id = self._active_users.get(username, None)
+		if conn_id is not None:
+			self._active_sessions.pop(conn_id)
+			self._active_users.pop(username)
 		return True
