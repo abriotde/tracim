@@ -6,6 +6,7 @@ from tracim_backend.lib.utils.daemon import FakeDaemon
 from tracim_backend.lib.utils.logger import logger
 from tracim_backend.views import BASE_API
 from tracim_backend.lib.samba_vfs.file_system_service import FileSystemService
+from tracim_backend.lib.samba_vfs.tracim_file_system_service import TracimFileSystemService
 from tracim_backend.lib.utils.logger import logger
 
 class SambaVFSDaemon(FakeDaemon):
@@ -23,6 +24,8 @@ class SambaVFSDaemon(FakeDaemon):
         self.config = config
         self._service:SambaVFSServer = None
         self.burst = burst
+        self._args = args
+        self._kwargs = kwargs
 
     def append_thread_callback(self, callback: typing.Callable) -> None:
         logger.warning(self, "SambaVFSDaemon does not implement append_thread_callback")
@@ -34,7 +37,8 @@ class SambaVFSDaemon(FakeDaemon):
 
     def run(self) -> None:
         self._service = SambaVFSServer(
-            service=FileSystemService(self.config),
+            # service=FileSystemService(self.config),
+            service=TracimFileSystemService(self.config, self._args, self._kwargs),
             socket="/srv/samba_vfs_tracim_service.sock" # TODO self.config.SAMBA__VFS__SOCKET
         )
         self._service.run()

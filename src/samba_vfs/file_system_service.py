@@ -7,17 +7,7 @@ from enum import Enum, IntEnum
 from dataclasses import dataclass, field
 from pluggy import PluginManager
 from pathlib import Path
-from tracim_backend.config import CFG
-from tracim_backend.exceptions import NotAuthenticated
-from tracim_backend.models.tracim_session import TracimSession
-from tracim_backend.models.auth import User
-from tracim_backend.models.data import Content
-from tracim_backend.models.data import Workspace
-from tracim_backend.lib.core.user import UserApi
 from tracim_backend.lib.utils.logger import logger
-from tracim_backend.lib.utils.request import TracimContext
-from tracim_backend.lib.webdav.resources import WorkspaceAndContentContainer
-from tracim_backend.lib.webdav.dav_provider import ProcessedWebdavPath
 
 class FileSystemException(Exception):
 	def __init__(self, message):
@@ -125,7 +115,7 @@ class SambaVFSSession:
 	service:str
 	user:str
 	connected_at:float
-	workspace:WorkspaceAndContentContainer
+	workspace: Optional[Any]  # Placeholder for workspace object, replace with actual type if known
 
 @dataclass
 class SambaVFSFileHandler:
@@ -137,89 +127,6 @@ class SambaVFSFileHandler:
 	content:str = b"" # Case file: binary content
 	mask:int = 0
 	entries:list[str] = field(default_factory=lambda: []) # Case dir: list of files
-
-class SambaVFSTracimContext(TracimContext):
-	def __init__(
-		self,
-		app_config,
-		user:str,
-		plugin_manager:PluginManager=None
-	):
-		super().__init__()
-		self._candidate_parent_content = None
-		self._app_config = app_config
-		self._session = None
-		self._plugin_manager = plugin_manager
-		self._username = user
-		self.processed_path = None
-		self.processed_destpath = None
-
-	@property
-	def dbsession(self) -> TracimSession:
-		assert self._session
-		return self._session
-
-	@dbsession.setter
-	def dbsession(self, session: TracimSession) -> None:
-		self._session = session
-
-	@property
-	def app_config(self) -> CFG:
-		return self._app_config
-
-	@property
-	def plugin_manager(self) -> PluginManager:
-		return self._plugin_manager
-
-	@property
-	def current_user(self) -> User:
-		"""
-		Current authenticated user if exist
-		"""
-		if not self._current_user:
-			uapi = UserApi(None, show_deleted=True, session=self.dbsession, config=self.app_config)
-			user = uapi.get_one_by_login(self._username)
-			self.set_user(user)
-		return self._current_user
-
-	def _get_current_webdav_username(self) -> str:
-		if not self.environ.get("wsgidav.auth.user_name"):
-			raise NotAuthenticated("User not found")
-		return self.environ["wsgidav.auth.user_name"]
-
-	@property
-	def current_workspace(self) -> typing.Optional[Workspace]:
-		"""
-		Workspace of current ressources used if exist, for example,
-		if you are editing content 21 in workspace 3,
-		current_workspace will be 3.
-		"""
-		return self.processed_path.current_workspace
-
-	@property
-	def current_content(self) -> typing.Optional[Content]:
-		"""
-		Current content if exist, if you are editing content 21, current content
-		will be content 21.
-		"""
-		return self.processed_path.current_content
-
-	def set_destpath(self, destpath: str) -> None:
-		self.processed_destpath = ProcessedWebdavPath(
-			path=destpath,
-			current_user=self.current_user,
-			session=self.dbsession,
-			app_config=self.app_config,
-		)
-
-	@property
-	def candidate_parent_content(self) -> typing.Optional[Content]:
-		return self.processed_destpath.current_parent_content
-
-	@property
-	def candidate_workspace(self) -> typing.Optional[Workspace]:
-		return self.processed_destpath.current_workspace
-
 
 class FileSystemService:
 	"""
@@ -235,22 +142,25 @@ class FileSystemService:
 		self.db = None  # Placeholder - replace with your actual DB connection
 		logger.info(self, "Tracim file service initialized")
 		self._file_descriptors:Dict[int, SambaVFSFileHandler] = {}  # Store open file handles
-		self.active_connections:Dict[int, SambaVFSSession] = {}  # Store active connections
-		self.active_users:Dict[str, int] = {} # Index connection's id by username.
+		self._active_connections:Dict[int, SambaVFSSession] = {}  # Store active connections
+		self._active_users:Dict[str, int] = {} # Index connection's id by username.
 		self._next_fd = 1  # Incremental ID for file and directory handles, do not use 0 as it can be confused to NULL in C VFS cast.
 		self.config = config
 		self._files = {}
 		self.mount_point = ""
 
 	def get_file_info_fd(self, fd: int, username: str) -> Dict[str, Any]:
+		"""
+		Same as get_file_info but using file descriptor.
+		"""
 		finfo = self._file_descriptors.get(fd, None)
 		if finfo is None:
-			return {"exists": False}
+			raise FileSystemException("Invalid file descriptor")
 		return self.get_file_info(finfo.path, username)
 
 	def get_file_info(self, path: str, username: str) -> Dict[str, Any]:
 		"""
-		Get information about a file or directory.
+		Get information about a file or directory. Owner, rights, group, file type(folder, link)
 		"""
 		# logger.info(self, f"Getting file info for {path} (user: {username})")
 		default_file_infos = {"exists": False}
@@ -458,7 +368,7 @@ class FileSystemService:
 		f_getlck = (pid == -1)
 		finfo = self._file_descriptors.get(fd, None)
 		if finfo is None:
-			raise Exception("No such file.")
+			raise FileSystemException("No such file.")
 		lock_infos = self._files.get(finfo.path).get("lock", None)
 		if lock_infos is None:
 			lock_infos = FLock(FLockType.UNLCK, FLockWhence.SEEK_SET, 0, 0, pid)
@@ -648,19 +558,9 @@ class FileSystemService:
 		self.mount_point = os.path.normpath(mount_point)
 		conn_id = self._next_fd
 		self._next_fd += 1
-		context = SambaVFSTracimContext(self.config, "TheAdmin") # TODO User is set in hardcoded to 'TheAdmin' should be 'user'
-		""" workspace_container = WorkspaceAndContentContainer(
-			path="/",
-			environ={},
-			label="",
-			content=None,
-			workspace=None,
-			provider=None,
-			tracim_context=context
-		) """
 		session = SambaVFSSession(service, user, time.time(), None)
-		self.active_connections[conn_id] = session
-		self.active_users[user] = conn_id
+		self._active_connections[conn_id] = session
+		self._active_users[user] = conn_id
 		self._files = {
 			".": {
 				"exists": True,
@@ -706,10 +606,10 @@ class FileSystemService:
 		"""
 		Get the workspace for a user.
 		"""
-		conn_id = self.active_users.get(username)
+		conn_id = self._active_users.get(username)
 		if conn_id is None:
 			return None
-		connection = self.active_connections.get(conn_id)
+		connection = self._active_connections.get(conn_id)
 		if connection is None:
 			return None
 		return connection.workspace
@@ -720,8 +620,8 @@ class FileSystemService:
 		"""
 		logger.info(self, f"Disconnecting connection {conn_id}")
 
-		infos = self.active_connections.get(conn_id, None)
+		infos = self._active_connections.get(conn_id, None)
 		if infos is not None:
-			self.active_connections.pop(conn_id)
-			self.active_users.pop(infos["user"])
+			self._active_connections.pop(conn_id)
+			self._active_users.pop(infos["user"])
 		return True

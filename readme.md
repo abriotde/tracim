@@ -31,7 +31,10 @@ WebDav
 
 https://demo.tracim.fr/api/doc/
 
-../ref/tracim/backend/tracim_backend/lib/webdav/resources.py
+tracim/backend/tracim_backend/lib/webdav/resources.py
+
+* class SambaVFSAppFactory(object): # backend/tracim_backend/lib/webdav/__init__.py : WebdavAppFactory / CaldavAppFactory
+  - def get_wsgi_app
 
 
 https://github.com/tracim/tracim/blob/develop/backend/tracim_backend/lib/core/content.py
