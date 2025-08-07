@@ -213,7 +213,7 @@ class FileSystemService:
 		"""
 		Get information about a file or directory. Owner, rights, group, file type(folder, link)
 		"""
-		# logger.info(self, f"Getting file info for {path} (user: {username})")
+		logger.info(self, f"Getting file info for {path} (user: {username})")
 		path = os.path.normpath(path)
 		if path in [self.mount_point, "/"]:
 			path="."
@@ -370,17 +370,20 @@ class FileSystemService:
 		is_dir = options & int(FileOptions.FILE_DIRECTORY_FILE) != 0
 		fd = -1
 		path = os.path.normpath(path)
-		file_info = self.get_file_info(path, user)
 		info = -1
-		exists = file_info is not None
-		if file_info is None:
+		exists = False
+		try:
+			file_info = self.get_file_info(path, user)
+			exists = file_info is not None
+		except FileSystemException as e: # File not exists
 			if (disposition & int(FileDisposition.FILE_CREATE) != 0) or (disposition == FileDisposition.FILE_OVERWRITE_IF):
 				exists = True
 				info = FileInfo.FILE_WAS_CREATED
 				self.create_real_file(path, user, is_directory=is_dir)
 				file_info = self.get_file_info(path, user)
 			else:
-				raise FileSystemException(f"No such file : {path}.")
+				logger.info(self, "create_file() : ERROR get_file_info : {e.message}")
+				raise FileSystemException(f"No such file : {path}")
 		if exists and ((options & int(FileDisposition.FILE_OPEN)) or (options & int(FileDisposition.FILE_OVERWRITE))):
 			ok = False
 			if fd>0:
@@ -639,10 +642,7 @@ class FileSystemService:
 		conn_id = self._active_users.get(username)
 		if conn_id is None:
 			return None
-		connection = self._active_sessions.get(conn_id)
-		if connection is None:
-			return None
-		return connection
+		return self._active_sessions.get(conn_id)
 
 	def set_session(self, username:str, session):
 		"""

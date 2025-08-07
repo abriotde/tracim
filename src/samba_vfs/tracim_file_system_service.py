@@ -178,25 +178,33 @@ class TracimFileSystemService(FileSystemService):
 		self._args = args
 		self._kwargs = kwargs
 
+
+	def get_session(self, username:str):
+		session = super().get_session(username)
+		if session is None:
+			raise FileSystemException("Fail get session")
+		return session
+
 	def get_file_info(self, path: str, username: str) -> Dict[str, Any]:
 		"""
 		Get information about a file or directory. Owner, rights, group, file type(folder, link)
 		"""
 		if path in [self.mount_point, "."]:
 			path="/"
+		logger.debug(self, f"get_file_info: {path} for user {username}")
 		session = self.get_session(username)
 		filelist = PurePath(path).parts
-		if len(filelist) == 0 or filelist[0]=="":
+		logger.info(self, f"File list : ({filelist})")
+		if len(filelist) == 0 or path=="/":
 			fileresource = session
 		else:
 			fileresource = session.provider.get_resource_inst(
 				path,
 				session.environ,
 			)
+		logger.info(self, f"File resource : {fileresource} ({filelist})")
 		if fileresource is None:
 			raise FileSystemException("File not found ({filelist}).")
-		logger.info(self, f"File resource : {fileresource} ({filelist})")
-		logger.debug(self, f"get_file_info: {path} for user {username}")
 		if isinstance(fileresource, FolderResource) \
 				or isinstance(fileresource, RootResource) \
 				or fileresource==session:

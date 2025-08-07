@@ -1306,6 +1306,7 @@ static NTSTATUS tracim_create_file(struct vfs_handle_struct *handle,
 	}
 	json_t *request = json_object();
 	json_object_set_new(request, "op", json_string("create"));
+	json_object_set_new(request, "user", json_string(data->user));
 	json_object_set_new(request, "path", json_string(fname));
 	json_object_set_new(request, "disposition", json_integer(create_disposition));
 	json_object_set_new(request, "options", json_integer(create_options));
