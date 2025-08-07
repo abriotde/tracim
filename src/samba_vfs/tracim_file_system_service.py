@@ -186,7 +186,23 @@ class TracimFileSystemService(FileSystemService):
 			raise FileSystemException("Fail get session")
 		return session
 
-	def get_file_info(self, path: str, username: str) -> Dict[str, Any]:
+	def get_file_info(self, path: str, username: str, data=None) -> Dict[str, Any]:
+		"""
+		"""
+		if data is None:
+			data = self.get_file_resource(path, username)
+		return self.resource2SambaVFSFile(data)
+
+	def get_file_info_fd(self, fd: int) -> Dict[str, Any]:
+		"""
+		Same as get_file_info but using file descriptor.
+		"""
+		finfo = self._file_descriptors.get(fd, None)
+		if finfo is None:
+			raise FileSystemException("Invalid file descriptor")
+		return self.resource2SambaVFSFile(finfo.data)
+
+	def get_file_resource(self, path: str, username: str) -> Dict[str, Any]:
 		"""
 		Get information about a file or directory. Owner, rights, group, file type(folder, link)
 		"""
@@ -207,61 +223,75 @@ class TracimFileSystemService(FileSystemService):
 			for fname in filelist:
 				names = fileresource.get_member_names()
 				# logger.info(self, f"list : {names}")
-				index = names.index(fname)
+				try:
+					index = names.index(fname)
+				except ValueError:
+					raise FileSystemException(f"File not found : {fname} in {names} for path {path}")
 				list = fileresource.get_member_list()
 				# for l in list: logger.info(self, f"Member : {l}")
 				fileresource = list[index]
 				# fileresource = fileresource.get_member(fname) # Do not work due to name simplifications
 				logger.info(self, f"fname : {fileresource} ({fname})")
 		logger.info(self, f"File resource : {fileresource} ({filelist})")
-		if fileresource is None:
-			raise FileSystemException("File not found ({filelist}).")
-		if isinstance(fileresource, FolderResource) \
-				or isinstance(fileresource, RootResource) \
-				or fileresource==session:
+		return fileresource
+
+	def resource2SambaVFSFile(self, fileresource) -> Dict[str, Any]:
+		if isinstance(fileresource, (FolderResource, RootResource, WorkspaceAndContentContainer)):
 			is_dir = True
-		elif isinstance(fileresource, FileResource) or isinstance(fileresource, OtherFileResource):
+		elif isinstance(fileresource, (FileResource, OtherFileResource)):
 			is_dir = False
 		else:
 			is_dir = False
-		return SambaVFSFile(path=path, is_directory=is_dir)
+		return SambaVFSFile(path=fileresource.path, is_directory=is_dir)
 
 	def open_file(self, path: str, username: str, flags: int, mode: int, fd: int = 0) -> Dict[str, Any]:
 		"""
 		Open a file and return a file descriptor to it. Used to to create a new file (using flags).
 		"""
+		res = self.get_file_resource(path, username)
 		return super().open_file(
 			path=path,
 			username=username,
 			flags=flags,
 			mode=mode,
-			fd=fd
-		)
-	
-	def read_file(self, handle: int, size: int) -> Dict[str, Any]:
-		"""
-		Read data from a file.
-		"""
-		return super().read_file(
-			handle=handle,
-			size=size
+			fd=fd,
+			data=res
 		)
 
-	def unlink(self, path:str, fd:int, flags:int) -> bool:
+	def read_file(self, handle:int, size:int) -> Dict[str, Any]:
+		"""
+		Read data from a file.
+		TODO
+		"""
+		logger.error(self, "TODO : read_file")
+		# Pb is in tracim_context, set_path() set a ProcessedWebdavPath, but without it's current_workspace
+		# File "/tracim/backend/tracim_backend/lib/utils/authorization.py", line 210, in check
+		#     tracim_context.current_workspace.get_user_role(tracim_context.current_user)
+		# AttributeError: 'NoneType' object has no attribute 'get_user_role'
+		# finfo = self._file_descriptors.get(handle, None)
+		# return finfo.data.get_content()
+		return ""
+
+	def unlink(self, path:str, fd:int, flags:int, username:str) -> bool:
 		"""
 		Remove a file or a directory, but keep datas to allow close file later.
 		TODO : recursive for directories ?
 		"""
-		return super().unlink(
-			path=path,
-			fd=fd,
-			flags=flags
-		)
-	
+		logger.error(self, "TODO : unlink")
+		# Same pb as read_file()
+		# File "/tracim/backend/tracim_backend/lib/utils/authorization.py", line 210, in check
+		#     tracim_context.current_workspace.get_user_role(tracim_context.current_user)   
+		# AttributeError: 'NoneType' object has no attribute 'get_user_role'
+		# res = self.get_file_resource(path, username)
+		# return res.delete()
+		return True
+
 	def write_file(self, handle: int, data: str, size: int, offset:int) -> Dict[str, Any]:
 		"""
 		Write data to a file.
+		TODO
 		"""
+		logger.error(self, "TODO : write_file")
 		return super().write_file(
 			handle=handle,
 			data=data,
@@ -273,6 +303,7 @@ class TracimFileSystemService(FileSystemService):
 		"""
 		TODO
 		"""
+		logger.error(self, "TODO : create_real_file()")
 		return True
 
 	def lock_file(self, fd, len, pid, start, type:FLockType, whence:FLockWhence):
@@ -288,34 +319,35 @@ class TracimFileSystemService(FileSystemService):
 			whence=whence
 		)
 	
-	def rename_file(self, src:str, dst:str, srcfd:int, dstfd:int, username:str):
+	def rename_file(self, src:str, dst:str, srcfd:int, dstfd:int, username:str) -> bool:
 		"""
 		Could be used to rename a file or directory.
+		dst can be just file name, the folder dst is design by dstfd (FD)
+		src can be just file name, the folder src is design by srcfd (FD)
 		"""
-		
-		return super().rename_file(
-			src=src,
-			dst=dst,
-			srcfd=srcfd,
-			dstfd=dstfd
-		)
-		
+		finfo = self.get_file_resource(src, username)
+		dstfinfo = self._file_descriptors.get(dstfd)
+		if dstfinfo is None:
+			raise FileSystemException("Destination folder fd parameter is not a valid.")
+		dstpath = dstfinfo.data.path+"/"+dst
+		logger.debug(self, "Rename {finfo.path} to {dstpath}")
+		# Same pb as read_file()
+		# finfo.move_recursive(dstpath) # TODO
+		logger.error(self, "TODO : rename_file()")
+		return True
 
 	def close_file(self, handle: int) -> Dict[str, Any]:
 		"""
 		Close a file descriptor.
 		"""
-		return super().close_file(
-			handle=handle
-		)
+		return super().close_file(handle=handle)
 
-	def open_directory(self, path: str, username: str, mask: str) -> Dict[str, Any]:
+	def open_directory(self, path:str, username:str, mask:str) -> Dict[str, Any]:
 		"""
 		Open a directory for listing containing files. 
 		"""
-		session = self.get_session(username)
-		# TODO go to path
-		entries = session.get_member_names()
+		res = self.get_file_resource(path, username)
+		entries = res.get_member_names()
 		fd = self._next_fd
 		self._next_fd += 1
 		self._file_descriptors[fd] = SambaVFSFileHandler(
@@ -323,7 +355,8 @@ class TracimFileSystemService(FileSystemService):
 			username=username,
 			mask=mask,
 			entries=entries,
-			position= 0
+			position=0,
+			data=res
 		)
 		return fd
 	
@@ -367,6 +400,7 @@ class TracimFileSystemService(FileSystemService):
 		# middleware.py : TracimEnv.__call__(self, environ, start_response)
 		# session = SambaVFSTracimSession(service, user, time.time(), None, args=self._args, kwargs=self._kwargs)
 		tracim_context = SambaVFSTracimContext(self.config, user="TheAdmin") # TODO User is set in hardcoded to 'TheAdmin' should be 'user'
+		logger.error(self, "TODO : init_connection: set user")
 		engine = get_engine(self.config)
 		session_factory = get_session_factory(engine)
 		dbsession = create_dbsession_for_context(
@@ -374,6 +408,7 @@ class TracimFileSystemService(FileSystemService):
 		)
 		tracim_context.dbsession = dbsession
 		path = "" # TODO : Set the path to "/" ?
+		logger.error(self, "TODO : init_connection: set path")
 		tracim_context.set_path(path)
 		webdav_provider = TracimDavProvider(app_config=self.config, manage_locks=False)
 		user_api = UserApi(

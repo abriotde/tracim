@@ -626,6 +626,7 @@ static int tracim_unlinkat(vfs_handle_struct *handle,
     json_object_set_new(request, "op", json_string("unlink"));
     json_object_set_new(request, "path", json_string(path));
 	json_object_set_new(request, "fd", json_integer(fsp_get_pathref_fd(dirfsp)));
+    json_object_set_new(request, "user", json_string(data->user));
     json_t *response = send_request(data, request);
     json_decref(request);
     if (!response) {

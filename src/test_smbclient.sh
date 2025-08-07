@@ -13,6 +13,12 @@ function usage() {
 	echo " If no command is given, it runs the simple smbclient interactively."
 }
 
+FOLDER=user_alberic
+FILE=user_alberic/test.txt
+
+FOLDER="test dossier"
+FILE="discussion test.thread.html"
+
 function run() {
 	cmd="$1"
 	echo " - test '$cmd'"
@@ -30,14 +36,13 @@ EOF
 		;;
 		cd)
 			eval $TEST_CMD <<EOF
-cd user_alberic
+cd "$FOLDER"
 ls
 EOF
 			;;
 		get)
 			eval $TEST_CMD <<EOF
-cd user_alberic
-get test.txt
+get "$FILE"
 EOF
 			;;
 		put)
@@ -47,19 +52,18 @@ EOF
 			;;
 		rm)
 			eval $TEST_CMD <<EOF
-cd user_alberic
-rm test.txt 
+rm "$FILE" 
 EOF
 			;;
 		rename)
 			eval $TEST_CMD <<EOF
-cd user_alberic
-rename test.txt test2.txt
+rename "$FILE" test2.txt
 EOF
+# ls test2.txt
 			;;
 		mkdir)
 			eval $TEST_CMD <<EOF
-cd user_alberic
+cd "$FOLDER" 
 mkdir tutu
 EOF
 			;;

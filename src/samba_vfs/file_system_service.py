@@ -17,7 +17,7 @@ class FileSystemException(Exception):
 class SambaVFSFile:
 	def __init__(self, is_directory, path="", 
 			mtime=None, atime=None, ctime=None, can_read=True, can_write=True,
-			content="", size=16, xattr=None):
+			content="", size=16, xattr=None, data=None):
 		self.exists = True
 		self.is_directory = is_directory
 		self.size = size
@@ -44,6 +44,7 @@ class SambaVFSFile:
 			xattr = {}
 		self.xattr = xattr
 		self.inode = hash(path) & 0xFFFFFFFF
+		self.data = data
 
 	def set_path(self, path):
 		self.path = path
@@ -200,16 +201,16 @@ class FileSystemService:
 		self._files = {}
 		self.mount_point = ""
 
-	def get_file_info_fd(self, fd: int, username: str) -> Dict[str, Any]:
+	def get_file_info_fd(self, fd: int) -> Dict[str, Any]:
 		"""
 		Same as get_file_info but using file descriptor.
 		"""
 		finfo = self._file_descriptors.get(fd, None)
 		if finfo is None:
 			raise FileSystemException("Invalid file descriptor")
-		return self.get_file_info(finfo.path, username)
+		return self.get_file_info(finfo.path, finfo.username)
 
-	def get_file_info(self, path: str, username: str) -> Dict[str, Any]:
+	def get_file_info(self, path:str, username:str, data=None) -> Dict[str, Any]:
 		"""
 		Get information about a file or directory. Owner, rights, group, file type(folder, link)
 		"""
@@ -223,14 +224,13 @@ class FileSystemService:
 		# logger.info(self, f"file_infos: {file_infos}")
 		return file_infos
 
-	def open_file(self, path: str, username: str, flags: int, mode: int, fd: int = 0) -> Dict[str, Any]:
+	def open_file(self, path: str, username: str, flags: int, mode: int, fd: int = 0, data = None) -> Dict[str, Any]:
 		"""
 		Open a file and return a file descriptor to it. Used to to create a new file (using flags).
 		"""
 		# logger.info(self, f"Opening file {path} (user: {username}, flags: {flags})")
-		
 		# Check if file exists and user has permissions
-		file_info = self.get_file_info(path, username)
+		file_info = self.get_file_info(path, username, data=data)
 		# flags = 133120 = 0x20800 = O_NONBLOCK|O_LARGEFILE
 		directory_required = (flags & os.O_DIRECTORY)
 		if file_info is None or not file_info.exists:
@@ -238,11 +238,10 @@ class FileSystemService:
 			if not create_required:
 				raise FileSystemException("File not found (Flags : O_DIRECTORY={directory_required}, O_CREAT={create_required}.)")
 			self.create_file(path=path, username=username, disposition=FileDisposition.FILE_CREATE)
-			file_info = self.get_file_info(path, username)
+			file_info = self.get_file_info(path, username, data=data)
 		if directory_required:
 			if not file_info.is_directory:
 				raise FileSystemException("Not a directory")
-
 		# Check read/write permissions based on flags
 		read_required = (flags & os.O_RDONLY) or (flags & os.O_RDWR)
 		write_required = (flags & os.O_WRONLY) or (flags & os.O_RDWR)
@@ -250,19 +249,18 @@ class FileSystemService:
 			raise FileSystemException("Permission denied (read)")
 		if write_required and not file_info.can_write:
 			raise FileSystemException("Permission denied (write)")
-
 		# Placeholder - store file info for later operations
 		if fd<=0:
 			fd = self._next_fd
 			self._next_fd += 1
-		
 		self._file_descriptors[fd] = SambaVFSFileHandler(
 			path=path,
 			username=username,
 			flags=flags,
 			mode=mode,
 			position=0,
-			content=file_info.content
+			content=file_info.content,
+			data=data
 		)
 		return fd
 	
@@ -285,7 +283,7 @@ class FileSystemService:
 		
 		return data
 
-	def unlink(self, path:str, fd:int, flags:int) -> bool:
+	def unlink(self, path:str, fd:int, flags:int, username:str="") -> bool:
 		"""
 		Remove a file or a directory, but keep datas to allow close file later.
 		TODO : recursive for directories ?
@@ -453,9 +451,9 @@ class FileSystemService:
 		except FileSystemException as e:
 			raise FileSystemException("Source file not found ({srcpath}).")
 		try:
-			dst_finfo = self.get_file_info(dstpath, username)
+			self.get_file_info(dstpath, username)
 			raise FileSystemException("Can't rename {src}, destination file path ever exists ({dst}). Erase it?")
-		except FileSystemException as e:
+		except FileSystemException:
 			pass
 		src_finfo.set_path(dstpath)
 		logger.info(self, f"Renaming file {srcpath} to {dstpath}")

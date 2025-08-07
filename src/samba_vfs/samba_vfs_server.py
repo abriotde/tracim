@@ -137,7 +137,7 @@ class SambaVFSServer:
 					file_info = self._fs_service.get_file_info(path, user)
 				else:
 					fd = request.get("fd", -1)
-					file_info = self._fs_service.get_file_info_fd(fd, user)
+					file_info = self._fs_service.get_file_info_fd(fd)
 				if file_info is None:
 					raise FileSystemException("File not found.")
 				# logger.warning(self, f"process_request(stat) : File = {file_info}")
@@ -172,7 +172,8 @@ class SambaVFSServer:
 					request.get("fd", -1),
 					request.get("data", ""),
 					request.get("size", 0),
-					request.get("offset", 0)
+					request.get("offset", 0),
+					request.get("user", 0)
 				)}
 			elif op == "create":
 				result = self._fs_service.create_file(
@@ -206,7 +207,8 @@ class SambaVFSServer:
 				self._fs_service.unlink(
 					path=request.get("path", ""),
 					fd=request.get("fd", 0),
-					flags=request.get("flags", 0)
+					flags=request.get("flags", 0),
+					username=request.get("user", "")
 				)
 				result = True
 			elif op == "lock":
