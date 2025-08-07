@@ -30,13 +30,14 @@ from tracim_backend.lib.webdav.resources import (
 	WorkspaceAndContentContainer,
 	FolderResource,
 	FileResource,
-	RootResource
+	RootResource,
+	OtherFileResource
 )
 from tracim_backend.lib.webdav.dav_provider import (
 	ProcessedWebdavPath, TracimDavProvider
 )
 from tracim_backend.tests.utils import WedavEnvironFactory
-from tracim_backend.tests.utils import UserApiFactory
+from tracim_backend.lib.utils.utils import webdav_convert_file_name_to_display
 
 from .file_system_service import (
 	FileSystemException,
@@ -198,10 +199,20 @@ class TracimFileSystemService(FileSystemService):
 		if len(filelist) == 0 or path=="/":
 			fileresource = session
 		else:
-			fileresource = session.provider.get_resource_inst(
-				path,
-				session.environ,
-			)
+			# fileresource = session.provider.get_resource_inst(
+			# 	path,
+			# 	session.environ,
+			# )
+			fileresource = session
+			for fname in filelist:
+				names = fileresource.get_member_names()
+				# logger.info(self, f"list : {names}")
+				index = names.index(fname)
+				list = fileresource.get_member_list()
+				# for l in list: logger.info(self, f"Member : {l}")
+				fileresource = list[index]
+				# fileresource = fileresource.get_member(fname) # Do not work due to name simplifications
+				logger.info(self, f"fname : {fileresource} ({fname})")
 		logger.info(self, f"File resource : {fileresource} ({filelist})")
 		if fileresource is None:
 			raise FileSystemException("File not found ({filelist}).")
@@ -209,7 +220,7 @@ class TracimFileSystemService(FileSystemService):
 				or isinstance(fileresource, RootResource) \
 				or fileresource==session:
 			is_dir = True
-		elif isinstance(fileresource, FileResource):
+		elif isinstance(fileresource, FileResource) or isinstance(fileresource, OtherFileResource):
 			is_dir = False
 		else:
 			is_dir = False

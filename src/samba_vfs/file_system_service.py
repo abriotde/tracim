@@ -527,9 +527,9 @@ class FileSystemService:
 		No need to change it for Tracim.
 		"""
 		# logger.info(self, f"Reading from directory handle {handle}")
-		if handle not in self._file_descriptors:
+		dir_info = self._file_descriptors.get(handle)
+		if dir_info is None:
 			raise FileSystemException("Invalid directory handle")
-		dir_info = self._file_descriptors[handle]
 		entries = dir_info.entries
 		position = dir_info.position
 		# logger.info(self, f"read_directory(fd={handle}) : entries={entries}, position={position}")
