@@ -45,36 +45,38 @@ function install_deps {
 		liblmdb-dev lmdb-utils libgpgme11-dev libparse-yapp-perl \
 		libjansson-dev libarchive-dev libutf8proc-dev > /dev/null 2>&1
 	apt install -y \
-	build-essential \
-	python3-dev \
-	libacl1-dev \
-	libattr1-dev \
-	libblkid-dev \
-	libgnutls28-dev \
-	libreadline-dev \
-	python3-dnspython \
-	libbsd-dev \
-	libpopt-dev \
-	libldap2-dev \
-	libtalloc-dev \
-	libtdb-dev \
-	libtevent-dev \
-	libkrb5-dev \
-	libldb-dev \
-	libncurses5-dev \
-	libpam0g-dev \
-	libcups2-dev \
-	libjson-c-dev \
-	flex \
-	bison \
-	pkg-config \
-	python3-setuptools \
-	python3-markdown \
-	xsltproc \
-	docbook-xsl \
-	libgpgme-dev \
-	uuid-dev \
-	libjansson-dev > /dev/null 2>&1
+		build-essential \
+		git \
+		gcc \
+		libdbus \
+		libacl1-dev \
+		libattr1-dev \
+		libblkid-dev \
+		libgnutls28-dev \
+		libreadline-dev \
+		python3-dnspython \
+		libbsd-dev \
+		libpopt-dev \
+		libldap2-dev \
+		libtalloc-dev \
+		libtdb-dev \
+		libtevent-dev \
+		libkrb5-dev \
+		libldb-dev \
+		libncurses5-dev \
+		libpam0g-dev \
+		libcups2-dev \
+		libjson-c-dev \
+		flex \
+		bison \
+		pkg-config \
+		python3-setuptools \
+		python3-markdown \
+		xsltproc \
+		docbook-xsl \
+		libgpgme-dev \
+		uuid-dev \
+		libjansson-dev > /dev/null 2>&1
 }
 
 function load_samba_source {
@@ -242,7 +244,7 @@ function run_samba_vfs_service {
 	docker exec -it $TRACIM_DOCKER_CONTAINER bash -c "export TRACIM_CONF_PATH=/etc/tracim/development.ini;python3 /tracim/backend/daemons/samba_vfs_service.py 2>&1|tee /srv/tmpalb.log"
 }
 
-# install_deps
+install_deps
 load_samba_source
 compile_vfs_module
 install_vfs_module

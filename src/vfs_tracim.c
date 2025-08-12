@@ -656,7 +656,11 @@ static int tracim_renameat(vfs_handle_struct *handle,
 			  files_struct *srcfsp,
 			  const struct smb_filename *smb_fname_src,
 			  files_struct *dstfsp,
-			  const struct smb_filename *smb_fname_dst)
+			  const struct smb_filename *smb_fname_dst
+#if (SAMBA_VERSION_MAJOR > 4) || (SAMBA_VERSION_MAJOR == 4 && SAMBA_VERSION_MINOR >= 22)
+			 , const struct vfs_rename_how *how
+#endif
+)
 {
 	DEBUG(0, ("Tracim: tracim_renameat().\n"));
 	int srcfd = fsp_get_pathref_fd(srcfsp);
