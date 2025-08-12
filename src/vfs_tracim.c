@@ -57,7 +57,7 @@ extern NTSTATUS open_fake_file(struct smb_request *req, connection_struct *conn,
 				const struct smb_filename *smb_fname,
 				uint32_t access_mask,
 				files_struct **result);
-extern enum ndr_err_code ndr_push_nbt_name(struct ndr_push *ndr, ndr_flags_type ndr_flags, const struct nbt_name *r);
+
 char *BASE64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 void base64_encode(const char *in, const unsigned long in_len, char *out) {
@@ -781,7 +781,7 @@ static struct dirent *tracim_readdir(vfs_handle_struct *handle,
     json_decref(request);
 	if (!response) {
 		DEBUG(3, ("tracim: Failed to get response for readdir\n"));
-		return SMB_VFS_NEXT_READDIR(handle, dirfsp, dirp);
+		return NULL;
 	}
     success_obj = json_object_get(response, "success");
 	if (success_obj) {
@@ -858,10 +858,6 @@ static int tracim_closedir(vfs_handle_struct *handle, DIR *dirp)
 	}
     json_decref(response);
     return result;
-}
-enum ndr_err_code tracim_checker(struct ndr_push * s, ndr_flags_type ndr_flags, const void * r)
-{
-	return NDR_ERR_SUCCESS;
 }
 
 #ifdef SAMBA_4_17
@@ -1907,9 +1903,7 @@ static struct vfs_fn_pointers tracim_functions = {
 	.fntimes_fn = tracim_fntimes,
 //	.parent_pathname_fn = tracim_parent_pathname,
 
-#ifdef SAMBA_4_17
     .fgetxattr_fn = tracim_fgetxattr,
-#endif // SAMBA_4_17
     .fsetxattr_fn = tracim_fsetxattr,
     .fremovexattr_fn = tracim_fremovexattr,
     .flistxattr_fn = tracim_flistxattr,

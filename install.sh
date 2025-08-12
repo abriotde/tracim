@@ -41,43 +41,46 @@ function install_deps {
 	apt-get update > /dev/null 2>&1
 	apt install -y build-essential libjson-c-dev \
 		samba-dev libsmbclient-dev \
-		python3-dev python3-pip  \
+		python3-dev python3-pip libjson-perl \
 		liblmdb-dev lmdb-utils libgpgme11-dev libparse-yapp-perl \
 		libjansson-dev libarchive-dev libutf8proc-dev > /dev/null 2>&1
-	apt install -y \
-		samba \
-		build-essential \
-		git \
-		gcc \
-		libdbus \
-		libacl1-dev \
-		libattr1-dev \
-		libblkid-dev \
-		libgnutls28-dev \
-		libreadline-dev \
-		python3-dnspython \
-		libbsd-dev \
-		libpopt-dev \
-		libldap2-dev \
-		libtalloc-dev \
-		libtdb-dev \
-		libtevent-dev \
-		libkrb5-dev \
-		libldb-dev \
-		libncurses5-dev \
-		libpam0g-dev \
-		libcups2-dev \
-		libjson-c-dev \
-		flex \
-		bison \
-		pkg-config \
-		python3-setuptools \
-		python3-markdown \
-		xsltproc \
-		docbook-xsl \
-		libgpgme-dev \
-		uuid-dev \
-		libjansson-dev > /dev/null 2>&1
+	status=$?
+	if [ "$status" -ne 0 ]; then
+		echo "Fail apt install -y build-essential libjson-c-dev \
+			samba-dev libsmbclient-dev \
+			python3-dev python3-pip  \
+			liblmdb-dev lmdb-utils libgpgme11-dev libparse-yapp-perl \
+			libjansson-dev libarchive-dev libutf8proc-dev."
+		exit 1
+	fi
+	apt install -y samba \
+		build-essential git gcc libdbus-1-dev gnutls-dev bison \
+		libacl1-dev libacl1-dev libattr1-dev libblkid-dev \
+		libgnutls28-dev libreadline-dev python3-dnspython \
+		libbsd-dev libpopt-dev libldap2-dev \
+		libtalloc-dev libtdb-dev libtevent-dev \
+		libkrb5-dev libldb-dev libncurses5-dev \
+		libpam0g-dev libcups2-dev libjson-c-dev \
+		flex bison pkg-config \
+		python3-setuptools python3-markdown \
+		xsltproc docbook-xsl \
+		libgpgme-dev uuid-dev > /dev/null 2>&1
+	status=$?
+	if [ "$status" -ne 0 ]; then
+		echo "Fail apt install -y samba \
+			build-essential git gcc libdbus-1-dev gnutls-dev bison \
+			libacl1-dev libacl1-dev libattr1-dev libblkid-dev \
+			libgnutls28-dev libreadline-dev python3-dnspython \
+			libbsd-dev libpopt-dev libldap2-dev \
+			libtalloc-dev libtdb-dev libtevent-dev \
+			libkrb5-dev libldb-dev libncurses5-dev \
+			libpam0g-dev libcups2-dev libjson-c-dev \
+			flex bison pkg-config \
+			python3-setuptools python3-markdown \
+			xsltproc docbook-xsl \
+			libgpgme-dev uuid-dev."
+		exit 1
+	fi
 }
 
 function load_samba_source {
