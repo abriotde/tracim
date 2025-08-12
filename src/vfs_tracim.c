@@ -4,6 +4,7 @@
  */
 #undef TRACIM_DEBUG
 // Set in smb.conf "log level = 3 vfs:10"
+#include "version.h"
 #include "includes.h"
 #include "smbd/globals.h"
 #include "smbd/smbd.h"
@@ -30,6 +31,12 @@
 #include <dirent.h>
 #include <sys/eventfd.h>
 
+#if (SAMBA_VERSION_MAJOR > 4) || (SAMBA_VERSION_MAJOR == 4 && SAMBA_VERSION_MINOR >= 17)
+#define SAMBA_4_17
+#endif
+#if (SAMBA_VERSION_MAJOR > 4) || (SAMBA_VERSION_MAJOR == 4 && SAMBA_VERSION_MINOR >= 22)
+#define SAMBA_4_22
+#endif
 
 #ifndef SMB_VFS_INTERFACE_VERSION
 #error "SMB_VFS_INTERFACE_VERSION not defined"
