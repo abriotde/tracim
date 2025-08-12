@@ -268,9 +268,10 @@ class TracimFileSystemService(FileSystemService):
 		# File "/tracim/backend/tracim_backend/lib/utils/authorization.py", line 210, in check
 		#     tracim_context.current_workspace.get_user_role(tracim_context.current_user)
 		# AttributeError: 'NoneType' object has no attribute 'get_user_role'
-		# finfo = self._file_descriptors.get(handle, None)
-		# return finfo.data.get_content()
-		return ""
+		data = ""
+		finfo = self._file_descriptors.get(handle, None)
+		data = finfo.data.get_content()
+		return data
 
 	def unlink(self, path:str, fd:int, flags:int, username:str) -> bool:
 		"""
@@ -398,9 +399,13 @@ class TracimFileSystemService(FileSystemService):
 		# Placeholder
 		self.mount_point = os.path.normpath(mount_point)
 		# middleware.py : TracimEnv.__call__(self, environ, start_response)
-		# session = SambaVFSTracimSession(service, user, time.time(), None, args=self._args, kwargs=self._kwargs)
-		tracim_context = SambaVFSTracimContext(self.config, user="TheAdmin") # TODO User is set in hardcoded to 'TheAdmin' should be 'user'
 		logger.error(self, "TODO : init_connection: set user")
+		tracimusername = "TheAdmin"
+		session = SambaVFSTracimSession(
+			service, tracimusername, time.time(), 
+			workspace=workspace, args=self._args, kwargs=self._kwargs
+		)
+		tracim_context = SambaVFSTracimContext(self.config, user=tracimusername, session=session) # TODO User is set in hardcoded to 'TheAdmin' should be 'user'
 		engine = get_engine(self.config)
 		session_factory = get_session_factory(engine)
 		dbsession = create_dbsession_for_context(
@@ -437,12 +442,14 @@ class TracimFileSystemService(FileSystemService):
 		# 	show_deleted=False,
 		# 	show_archived=False,
 		# )
+		workspace = children[0].workspace if children else None
+		session.workspace = workspace
 		workspace_container = WorkspaceAndContentContainer(
 			path=path,
 			environ=environ,
 			label="",
 			content=None,
-			workspace=children[0].workspace if children else None,  # Use first child as workspace if exists
+			workspace=workspace,  # Use first child as workspace if exists
 			provider=webdav_provider,
 			tracim_context=tracim_context
 		)

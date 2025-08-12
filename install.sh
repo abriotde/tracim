@@ -45,6 +45,7 @@ function install_deps {
 		liblmdb-dev lmdb-utils libgpgme11-dev libparse-yapp-perl \
 		libjansson-dev libarchive-dev libutf8proc-dev > /dev/null 2>&1
 	apt install -y \
+		samba \
 		build-essential \
 		git \
 		gcc \
